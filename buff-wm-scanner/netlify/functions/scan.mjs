@@ -1,8 +1,8 @@
 // netlify/functions/scan.mjs
-// FIXED:
-// - WM auth: removed accessTokenExpiredAt (schema changed)
-// - WM endpoint: /graphql/partner (works)
-// - BUFF price normalization: fixes x100 prices
+// FIXED (again):
+// - WhiteMarket partner schema: market_list DOES NOT accept `pagination` arg
+// - Remove pagination + take first edge
+// - Keep BUFF x100 normalization
 
 const WM_GQL = "https://api.white.market/graphql/partner";
 
@@ -24,16 +24,10 @@ function json(statusCode, obj) {
   };
 }
 
-// Heuristic to fix BUFF returning price * 100 sometimes.
-// If price is insanely large, divide by 100.
 function normalizeBuffPriceCNY(raw) {
   let n = Number(raw);
   if (!Number.isFinite(n)) return 0;
-
-  // If BUFF gave an integer like 3499985 for a 34999.85 item, fix it.
-  // Anything > 200000 is almost surely "cents" (>= 2000 CNY * 100).
-  if (n > 200000) n = n / 100;
-
+  if (n > 200000) n = n / 100; // fixes x100 prices
   return n;
 }
 
@@ -46,7 +40,6 @@ async function wmGetAccessToken() {
     return wmCached.accessToken;
   }
 
-  // IMPORTANT: WM schema no longer has accessTokenExpiredAt.
   const query = `
     mutation AuthToken {
       auth_token {
@@ -81,7 +74,7 @@ async function wmGetAccessToken() {
   const token = data?.data?.auth_token?.accessToken;
   if (!token) throw new Error("WM auth: no accessToken returned");
 
-  // Cache token for 20 minutes (safe + simple)
+  // cache 20 minutes (simple + works)
   wmCached.accessToken = token;
   wmCached.expiresAt = Date.now() + 20 * 60 * 1000;
 
@@ -91,10 +84,10 @@ async function wmGetAccessToken() {
 async function wmFetchBestOffer(nameHash) {
   const accessToken = await wmGetAccessToken();
 
-  // offerMinPrice = best buy offer price (matches “Buy offers”)
+  // IMPORTANT: no pagination arg (partner schema rejects it)
   const query = `
     query MarketList($search: MarketProductSearchInput) {
-      market_list(search: $search, pagination: { first: 1 }) {
+      market_list(search: $search) {
         edges {
           node {
             nameHash
@@ -139,7 +132,7 @@ async function wmFetchBestOffer(nameHash) {
   }
 
   const node = data?.data?.market_list?.edges?.[0]?.node;
-  if (!node) return { wmPrice: 0, wmUrl: "", wmCurrency: "USD" };
+  if (!node) return { wmPrice: 0, wmBuyQty: 0, wmUrl: "", wmCurrency: "USD" };
 
   const wmPrice = Number(node?.offerMinPrice?.value ?? 0);
   const wmCurrency = node?.offerMinPrice?.currency ?? "USD";
@@ -147,6 +140,7 @@ async function wmFetchBestOffer(nameHash) {
 
   return {
     wmPrice: Number.isFinite(wmPrice) ? wmPrice : 0,
+    wmBuyQty: 0, // partner schema may not expose qty; keep 0 for now
     wmUrl,
     wmCurrency,
   };
@@ -192,9 +186,7 @@ async function buffFetchTop(limit) {
       it?.goods_info?.original_icon_url ||
       "";
 
-    const rawPrice =
-      it?.sell_min_price ?? it?.min_price ?? it?.price ?? 0;
-
+    const rawPrice = it?.sell_min_price ?? it?.min_price ?? it?.price ?? 0;
     const priceCny = normalizeBuffPriceCNY(rawPrice);
 
     const quantity = Number(it?.sell_num ?? it?.num ?? it?.market_count ?? 0) || 0;
@@ -218,17 +210,17 @@ export async function handler(event) {
     );
 
     const fx = Number(process.env.FX_CNYUSD || "0.14");
-
     const buffItems = await buffFetchTop(limit);
 
     const out = [];
     for (const item of buffItems) {
-      let wm = { wmPrice: 0, wmUrl: "", wmCurrency: "USD" };
+      let wm = { wmPrice: 0, wmUrl: "", wmCurrency: "USD", wmBuyQty: 0 };
       try {
         wm = await wmFetchBestOffer(item.name);
       } catch (e) {
         wm = {
           wmPrice: 0,
+          wmBuyQty: 0,
           wmUrl: "",
           wmCurrency: "USD",
           wmError: String(e?.message || e),
@@ -239,6 +231,7 @@ export async function handler(event) {
         ...item,
         fx,
         wmPrice: wm.wmPrice,
+        wmBuyQty: wm.wmBuyQty,
         wmUrl: wm.wmUrl,
         wmCurrency: wm.wmCurrency,
         wmError: wm.wmError || "",
