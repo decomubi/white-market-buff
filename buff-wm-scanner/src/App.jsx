@@ -3,7 +3,18 @@ import { Search, ArrowUpDown, TrendingUp, Box, RefreshCw, Filter, ExternalLink }
 
 // Keep mock as fallback (if backend fails)
 const MOCK_DATA = [
-  { id: 1, name: "AK-47 | Redline", wear: "Field-Tested", image: "https://community.cloudflare.steamstatic.com/economy/image/-9a81dlWLwJ2UUGcVs_nsVtzdOEdtWwKGZZLQHTxDZ7I56KU0Zwwo4NUX4oFJZEHLbXH5ApeO4YmlhxYQknCRvCo04DEVlxkKgpot7HxfDhjxszJemkV09-5lpKKqPrxN7LEmyVQ7MEpiLuSrYmnjQO3-UdsZGrwIdKQegA4N1iF_gDQyL3n1sS56M_LznygnXP-n1DwJzs", buffPrice: 14.50, wmPrice: 18.20, quantity: 124, fx: 0.14 },
+  {
+    id: 1,
+    name: "AK-47 | Redline",
+    wear: "Field-Tested",
+    image:
+      "https://community.cloudflare.steamstatic.com/economy/image/-9a81dlWLwJ2UUGcVs_nsVtzdOEdtWwKGZZLQHTxDZ7I56KU0Zwwo4NUX4oFJZEHLbXH5ApeO4YmlhxYQknCRvCo04DEVlxkKgpot7HxfDhjxszJemkV09-5lpKKqPrxN7LEmyVQ7MEpiLuSrYmnjQO3-UdsZGrwIdKQegA4N1iF_gDQyL3n1sS56M_LznygnXP-n1DwJzs",
+    buffPrice: 14.5,
+    wmPrice: 18.2,
+    quantity: 124,
+    fx: 0.14,
+    wmUrl: "https://white.market/search?search=AK-47%20%7C%20Redline"
+  },
 ];
 
 const App = () => {
@@ -11,6 +22,10 @@ const App = () => {
   const [sortConfig, setSortConfig] = useState({ key: 'spread', direction: 'desc' });
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState(MOCK_DATA);
+
+  // ✅ Upgrade 2: toggles
+  const [onlyProfitable, setOnlyProfitable] = useState(true);
+  const [hideNoBuyOrders, setHideNoBuyOrders] = useState(true);
 
   // Fetch from Netlify Function
   const fetchData = async () => {
@@ -48,7 +63,15 @@ const App = () => {
   const processedData = useMemo(() => {
     let data = items.map(calculateMetrics);
 
-    // Filtering
+    // ✅ Upgrade 2 filters
+    if (hideNoBuyOrders) {
+      data = data.filter(item => Number(item.wmPrice || 0) > 0);
+    }
+    if (onlyProfitable) {
+      data = data.filter(item => Number(item.profit || 0) > 0);
+    }
+
+    // Search Filtering
     if (searchTerm) {
       const lowerTerm = searchTerm.toLowerCase();
       data = data.filter(item =>
@@ -67,7 +90,7 @@ const App = () => {
     }
 
     return data;
-  }, [items, searchTerm, sortConfig]);
+  }, [items, searchTerm, sortConfig, hideNoBuyOrders, onlyProfitable]);
 
   const handleSort = (key) => {
     let direction = 'desc';
@@ -91,7 +114,9 @@ const App = () => {
                 <TrendingUp size={20} className="text-white" />
               </div>
               <div>
-                <h1 className="text-xl font-bold text-white tracking-tight">Arbitrage<span className="text-indigo-400">Scanner</span></h1>
+                <h1 className="text-xl font-bold text-white tracking-tight">
+                  Arbitrage<span className="text-indigo-400">Scanner</span>
+                </h1>
                 <p className="text-xs text-gray-500">Buff163 to WhiteMarket</p>
               </div>
             </div>
@@ -115,13 +140,33 @@ const App = () => {
 
         {/* Stats Row */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-          <StatCard label="Profitable Flips" value={processedData.filter(i => i.profit > 0).length} icon={<TrendingUp size={18} />} color="text-green-400" />
-          <StatCard label="Avg. Spread" value={`${(processedData.reduce((acc, curr) => acc + curr.spread, 0) / processedData.length || 0).toFixed(2)}%`} icon={<Box size={18} />} color="text-blue-400" />
-          <StatCard label="Total Volume" value={processedData.reduce((acc, curr) => acc + (Number(curr.quantity) || 0), 0)} icon={<Filter size={18} />} color="text-purple-400" />
-          <div className="bg-[#1a1b1e] p-4 rounded-xl border border-gray-800 flex items-center justify-between hover:border-gray-700 transition-colors cursor-pointer group" onClick={refreshData}>
+          <StatCard
+            label="Profitable Flips"
+            value={processedData.filter(i => i.profit > 0).length}
+            icon={<TrendingUp size={18} />}
+            color="text-green-400"
+          />
+          <StatCard
+            label="Avg. Spread"
+            value={`${(processedData.reduce((acc, curr) => acc + curr.spread, 0) / processedData.length || 0).toFixed(2)}%`}
+            icon={<Box size={18} />}
+            color="text-blue-400"
+          />
+          <StatCard
+            label="Total Volume"
+            value={processedData.reduce((acc, curr) => acc + (Number(curr.quantity) || 0), 0)}
+            icon={<Filter size={18} />}
+            color="text-purple-400"
+          />
+          <div
+            className="bg-[#1a1b1e] p-4 rounded-xl border border-gray-800 flex items-center justify-between hover:border-gray-700 transition-colors cursor-pointer group"
+            onClick={refreshData}
+          >
             <div>
               <p className="text-gray-500 text-xs font-medium uppercase tracking-wider">Data Status</p>
-              <p className="text-xl font-bold text-white mt-1 group-hover:text-indigo-400 transition-colors">{loading ? "Updating..." : "Up to Date"}</p>
+              <p className="text-xl font-bold text-white mt-1 group-hover:text-indigo-400 transition-colors">
+                {loading ? "Updating..." : "Up to Date"}
+              </p>
             </div>
             <RefreshCw size={24} className={`text-gray-500 group-hover:text-indigo-400 transition-all ${loading ? 'animate-spin' : ''}`} />
           </div>
@@ -140,7 +185,29 @@ const App = () => {
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
             />
+
+            {/* ✅ Upgrade 2 toggles */}
+            <div className="flex gap-4 mt-3 text-sm text-gray-400">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={hideNoBuyOrders}
+                  onChange={(e) => setHideNoBuyOrders(e.target.checked)}
+                />
+                Hide $0 buy orders
+              </label>
+
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={onlyProfitable}
+                  onChange={(e) => setOnlyProfitable(e.target.checked)}
+                />
+                Only profitable
+              </label>
+            </div>
           </div>
+
           <button className="flex items-center justify-center gap-2 px-6 py-3 border border-gray-800 text-sm font-medium rounded-xl text-gray-300 bg-[#1a1b1e] hover:bg-[#25262b] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 focus:ring-offset-[#121212] transition-colors">
             <Filter size={18} />
             Advanced Filters
@@ -162,10 +229,13 @@ const App = () => {
                   <th className="px-6 py-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                 </tr>
               </thead>
+
               <tbody className="divide-y divide-gray-800">
                 {processedData.length > 0 ? (
                   processedData.map((item) => (
                     <tr key={item.id} className="hover:bg-[#202124] transition-colors group">
+
+                      {/* Item Info */}
                       <td className="px-6 py-4 whitespace-nowrap">
                         <div className="flex items-center">
                           <div className="flex-shrink-0 h-12 w-16 relative bg-gray-800 rounded-md flex items-center justify-center overflow-hidden border border-gray-700">
@@ -173,13 +243,12 @@ const App = () => {
                           </div>
                           <div className="ml-4">
                             <div className="text-sm font-medium text-white">{item.name}</div>
-                            <div className="text-xs text-gray-500 flex items-center gap-2">
-                              {item.wear}
-                            </div>
+                            <div className="text-xs text-gray-500 flex items-center gap-2">{item.wear}</div>
                           </div>
                         </div>
                       </td>
 
+                      {/* Buff Price */}
                       <td className="px-6 py-4 whitespace-nowrap text-right">
                         <div className="flex items-center justify-end text-sm text-gray-300 font-mono">
                           <span className="text-xs text-gray-600 mr-1">¥</span>
@@ -188,6 +257,7 @@ const App = () => {
                         <div className="text-[10px] text-gray-500">Listing</div>
                       </td>
 
+                      {/* WM Price */}
                       <td className="px-6 py-4 whitespace-nowrap text-right">
                         <div className="flex items-center justify-end text-sm text-gray-300 font-mono">
                           <span className="text-xs text-gray-600 mr-1">$</span>
@@ -196,25 +266,29 @@ const App = () => {
                         <div className="text-[10px] text-gray-500">Buy Order</div>
                       </td>
 
+                      {/* Spread */}
                       <td className="px-6 py-4 whitespace-nowrap text-right">
                         <span className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-md ${item.spread > 0 ? 'bg-green-900/30 text-green-400 border border-green-900' : 'bg-red-900/30 text-red-400 border border-red-900'}`}>
                           {item.spread > 0 ? '+' : ''}{Number(item.spread || 0).toFixed(2)}%
                         </span>
                       </td>
 
+                      {/* Profit */}
                       <td className="px-6 py-4 whitespace-nowrap text-right">
                         <div className={`text-sm font-mono font-bold ${item.profit > 0 ? 'text-green-400' : 'text-red-400'}`}>
                           ${Number(item.profit || 0).toFixed(2)}
                         </div>
                       </td>
 
+                      {/* Quantity */}
                       <td className="px-6 py-4 whitespace-nowrap text-center">
                         <div className="text-sm text-gray-300">{Number(item.quantity || 0)}</div>
                         <div className="w-full bg-gray-800 rounded-full h-1 mt-1">
-                          <div className="bg-indigo-500 h-1 rounded-full" style={{ width: `${Math.min(Number(item.quantity || 0) * 2, 100)}%` }}></div>
+                          <div className="bg-indigo-500 h-1 rounded-full" style={{ width: `${Math.min(Number(item.quantity || 0) * 2, 100)}%` }} />
                         </div>
                       </td>
 
+                      {/* Actions */}
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                         <a
                           href={item.wmUrl || "https://white.market/"}
@@ -225,6 +299,7 @@ const App = () => {
                           <ExternalLink size={16} />
                         </a>
                       </td>
+
                     </tr>
                   ))
                 ) : (
@@ -233,7 +308,7 @@ const App = () => {
                       <div className="flex flex-col items-center justify-center">
                         <Search size={48} className="text-gray-700 mb-4" />
                         <p className="text-lg font-medium">No items found</p>
-                        <p className="text-sm">Try adjusting your search terms</p>
+                        <p className="text-sm">Try adjusting your filters/search</p>
                       </div>
                     </td>
                   </tr>
@@ -242,11 +317,14 @@ const App = () => {
             </table>
           </div>
 
+          {/* Footer */}
           <div className="bg-[#151619] px-4 py-3 border-t border-gray-800 flex items-center justify-between sm:px-6">
             <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
               <div>
                 <p className="text-sm text-gray-500">
-                  Showing <span className="font-medium text-gray-300">1</span> to <span className="font-medium text-gray-300">{processedData.length}</span> of <span className="font-medium text-gray-300">{items.length}</span> results
+                  Showing <span className="font-medium text-gray-300">1</span> to{" "}
+                  <span className="font-medium text-gray-300">{processedData.length}</span> of{" "}
+                  <span className="font-medium text-gray-300">{items.length}</span> results
                 </p>
               </div>
               <div>
@@ -292,7 +370,6 @@ const StatCard = ({ label, value, icon, color }) => (
 
 const Th = ({ label, sortKey, onClick, sortConfig, align = 'left' }) => {
   const isActive = sortConfig.key === sortKey;
-
   return (
     <th
       scope="col"
