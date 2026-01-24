@@ -1,3 +1,4 @@
+// src/App.jsx
 import React, { useEffect, useMemo, useState } from "react";
 import {
   Search,
@@ -14,91 +15,93 @@ const App = () => {
   const [sortConfig, setSortConfig] = useState({ key: "spread", direction: "desc" });
   const [loading, setLoading] = useState(false);
 
-  const [fx, setFx] = useState(0.14);
   const [items, setItems] = useState([]);
+  const [fx, setFx] = useState(0.14);
 
-  // ✅ Upgrade #1 + #2
-  const [hideZeroBuyOffers, setHideZeroBuyOffers] = useState(false);
+  // ✅ Upgrade #1
+  const [hideZeroBuyOffers, setHideZeroBuyOffers] = useState(true);
+  // ✅ Upgrade #2
   const [onlyProfitable, setOnlyProfitable] = useState(false);
 
-  const fetchData = async () => {
-    setLoading(true);
-    try {
-      const res = await fetch(`/.netlify/functions/scan?limit=30`, { cache: "no-store" });
-      const data = await res.json();
-
-      if (!res.ok || !data?.ok) {
-        throw new Error(data?.error || `HTTP ${res.status}`);
-      }
-
-      setFx(Number(data.fx || 0.14));
-      setItems(Array.isArray(data.items) ? data.items : []);
-    } catch (err) {
-      alert(`Scan failed: ${err?.message || String(err)}`);
-      setItems([]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Convert BUFF(CNY) -> USD using fx, WM already USD
   const calculateMetrics = (item) => {
-    const buffUsd = (Number(item.buffPrice || 0) * Number(fx || 0.14)) || 0;
-    const wmUsd = Number(item.wmPrice || 0) || 0;
+    // BUFF is CNY, WM is USD in this UI
+    // Convert BUFF to USD using fx so profit/spread are in USD terms.
+    const buffUsd = (Number(item.buffPrice) || 0) * (Number(item.fx ?? fx) || fx);
+    const wmUsd = Number(item.wmPrice) || 0;
 
     const profit = wmUsd - buffUsd;
-    const spread = buffUsd > 0 ? (profit / buffUsd) * 100 : 0;
+    const spread = buffUsd > 0 ? ((wmUsd - buffUsd) / buffUsd) * 100 : 0;
 
-    return { ...item, buffUsd, wmUsd, profit, spread };
+    return {
+      ...item,
+      buffUsd,
+      wmUsd,
+      profit,
+      spread,
+    };
   };
 
   const processedData = useMemo(() => {
-    let data = items.map(calculateMetrics);
+    let data = (items || []).map(calculateMetrics);
 
-    // Search
+    // Search filter
     if (searchTerm) {
       const lower = searchTerm.toLowerCase();
       data = data.filter(
-        (i) =>
-          (i.name || "").toLowerCase().includes(lower) ||
-          (i.wear || "").toLowerCase().includes(lower)
+        (x) =>
+          (x.name || "").toLowerCase().includes(lower) ||
+          (x.wear || "").toLowerCase().includes(lower)
       );
     }
 
-    // ✅ Upgrade #1: hide $0 buy offers
+    // ✅ Upgrade #1: Hide $0 buy offers
     if (hideZeroBuyOffers) {
-      data = data.filter((i) => (i.wmUsd || 0) > 0);
+      data = data.filter((x) => (Number(x.wmUsd) || 0) > 0);
     }
 
-    // ✅ Upgrade #2: only profitable
+    // ✅ Upgrade #2: Only profitable
     if (onlyProfitable) {
-      data = data.filter((i) => (i.profit || 0) > 0);
+      data = data.filter((x) => (Number(x.profit) || 0) > 0);
     }
 
     // Sorting
     if (sortConfig.key) {
       data.sort((a, b) => {
-        const av = a[sortConfig.key];
-        const bv = b[sortConfig.key];
-        if (av < bv) return sortConfig.direction === "asc" ? -1 : 1;
-        if (av > bv) return sortConfig.direction === "asc" ? 1 : -1;
+        if (a[sortConfig.key] < b[sortConfig.key]) return sortConfig.direction === "asc" ? -1 : 1;
+        if (a[sortConfig.key] > b[sortConfig.key]) return sortConfig.direction === "asc" ? 1 : -1;
         return 0;
       });
     }
 
     return data;
-  }, [items, fx, searchTerm, hideZeroBuyOffers, onlyProfitable, sortConfig]);
+  }, [items, fx, searchTerm, sortConfig, hideZeroBuyOffers, onlyProfitable]);
 
   const handleSort = (key) => {
     let direction = "desc";
     if (sortConfig.key === key && sortConfig.direction === "desc") direction = "asc";
     setSortConfig({ key, direction });
   };
+
+  const refreshData = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/.netlify/functions/scan?limit=50`, { method: "GET" });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || "Scan failed");
+
+      setFx(Number(data.fx || 0.14));
+      setItems(data.items || []);
+    } catch (e) {
+      alert(`Scan failed: ${e.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="min-h-screen bg-[#121212] text-gray-200 font-sans selection:bg-indigo-500 selection:text-white">
@@ -132,9 +135,9 @@ const App = () => {
         </div>
       </nav>
 
-      {/* Main Content */}
+      {/* Main */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Stats Row */}
+        {/* Stats */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
           <StatCard
             label="Profitable Flips"
@@ -153,28 +156,24 @@ const App = () => {
           />
           <StatCard
             label="Total Volume"
-            value={processedData.reduce((acc, curr) => acc + (curr.quantity || 0), 0)}
+            value={processedData.reduce((acc, curr) => acc + (Number(curr.quantity) || 0), 0)}
             icon={<Filter size={18} />}
             color="text-purple-400"
           />
           <div
             className="bg-[#1a1b1e] p-4 rounded-xl border border-gray-800 flex items-center justify-between hover:border-gray-700 transition-colors cursor-pointer group"
-            onClick={fetchData}
+            onClick={refreshData}
           >
             <div>
-              <p className="text-gray-500 text-xs font-medium uppercase tracking-wider">
-                Data Status
-              </p>
+              <p className="text-gray-500 text-xs font-medium uppercase tracking-wider">Data Status</p>
               <p className="text-xl font-bold text-white mt-1 group-hover:text-indigo-400 transition-colors">
                 {loading ? "Updating..." : "Up to Date"}
               </p>
-              <p className="text-[11px] text-gray-500 mt-1">FX CNY→USD: {fx}</p>
+              <p className="text-[10px] text-gray-500 mt-1">FX CNY→USD: {fx}</p>
             </div>
             <RefreshCw
               size={24}
-              className={`text-gray-500 group-hover:text-indigo-400 transition-all ${
-                loading ? "animate-spin" : ""
-              }`}
+              className={`text-gray-500 group-hover:text-indigo-400 transition-all ${loading ? "animate-spin" : ""}`}
             />
           </div>
         </div>
@@ -193,19 +192,17 @@ const App = () => {
               onChange={(e) => setSearchTerm(e.target.value)}
             />
           </div>
-
           <button className="flex items-center justify-center gap-2 px-6 py-3 border border-gray-800 text-sm font-medium rounded-xl text-gray-300 bg-[#1a1b1e] hover:bg-[#25262b] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 focus:ring-offset-[#121212] transition-colors">
             <Filter size={18} />
             Advanced Filters
           </button>
         </div>
 
-        {/* ✅ Two checkbox upgrades */}
-        <div className="flex items-center gap-6 mb-6 text-sm text-gray-400">
+        {/* ✅ The two new toggles */}
+        <div className="flex items-center gap-6 text-sm text-gray-400 mb-6">
           <label className="flex items-center gap-2 select-none cursor-pointer">
             <input
               type="checkbox"
-              className="accent-indigo-500"
               checked={hideZeroBuyOffers}
               onChange={(e) => setHideZeroBuyOffers(e.target.checked)}
             />
@@ -215,7 +212,6 @@ const App = () => {
           <label className="flex items-center gap-2 select-none cursor-pointer">
             <input
               type="checkbox"
-              className="accent-indigo-500"
               checked={onlyProfitable}
               onChange={(e) => setOnlyProfitable(e.target.checked)}
             />
@@ -223,7 +219,7 @@ const App = () => {
           </label>
         </div>
 
-        {/* Data Table */}
+        {/* Table */}
         <div className="bg-[#1a1b1e] rounded-xl border border-gray-800 shadow-xl overflow-hidden">
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-800">
@@ -235,9 +231,7 @@ const App = () => {
                   <Th label="Spread" sortKey="spread" onClick={() => handleSort("spread")} sortConfig={sortConfig} align="right" />
                   <Th label="Net Profit" sortKey="profit" onClick={() => handleSort("profit")} sortConfig={sortConfig} align="right" />
                   <Th label="Quantity" sortKey="quantity" onClick={() => handleSort("quantity")} sortConfig={sortConfig} align="center" />
-                  <th className="px-6 py-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Actions
-                  </th>
+                  <th className="px-6 py-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                 </tr>
               </thead>
 
@@ -245,41 +239,37 @@ const App = () => {
                 {processedData.length > 0 ? (
                   processedData.map((item) => (
                     <tr key={item.id} className="hover:bg-[#202124] transition-colors group">
-                      {/* Item Info */}
                       <td className="px-6 py-4 whitespace-nowrap">
                         <div className="flex items-center">
                           <div className="flex-shrink-0 h-12 w-16 relative bg-gray-800 rounded-md flex items-center justify-center overflow-hidden border border-gray-700">
-                            {item.image ? (
-                              <img
-                                className="h-full object-contain transform group-hover:scale-110 transition-transform duration-300"
-                                src={item.image}
-                                alt=""
-                              />
-                            ) : null}
+                            <img
+                              className="h-full object-contain transform group-hover:scale-110 transition-transform duration-300"
+                              src={item.image}
+                              alt=""
+                              onError={(e) => (e.currentTarget.style.display = "none")}
+                            />
                           </div>
                           <div className="ml-4">
                             <div className="text-sm font-medium text-white">{item.name}</div>
-                            <div className="text-xs text-gray-500">{item.wear || "-"}</div>
+                            <div className="text-xs text-gray-500">{item.wear}</div>
                           </div>
                         </div>
                       </td>
 
-                      {/* Buff Price (CNY) */}
+                      {/* BUFF (CNY) */}
                       <td className="px-6 py-4 whitespace-nowrap text-right">
                         <div className="flex items-center justify-end text-sm text-gray-300 font-mono">
                           <span className="text-xs text-gray-600 mr-1">¥</span>
-                          {Number(item.buffPrice || 0).toFixed(2)}
+                          {Number(item.buffPrice).toFixed(2)}
                         </div>
-                        <div className="text-[10px] text-gray-500">
-                          ≈ ${(item.buffUsd || 0).toFixed(2)} (FX)
-                        </div>
+                        <div className="text-[10px] text-gray-500">Listing</div>
                       </td>
 
-                      {/* WM Buy Offer (USD) */}
+                      {/* WM (USD buy offer) */}
                       <td className="px-6 py-4 whitespace-nowrap text-right">
                         <div className="flex items-center justify-end text-sm text-gray-300 font-mono">
                           <span className="text-xs text-gray-600 mr-1">$</span>
-                          {Number(item.wmUsd || 0).toFixed(2)}
+                          {Number(item.wmUsd).toFixed(2)}
                         </div>
                         <div className="text-[10px] text-gray-500">Buy offer</div>
                       </td>
@@ -294,29 +284,22 @@ const App = () => {
                           }`}
                         >
                           {item.spread > 0 ? "+" : ""}
-                          {Number(item.spread || 0).toFixed(2)}%
+                          {Number(item.spread).toFixed(2)}%
                         </span>
                       </td>
 
                       {/* Profit */}
                       <td className="px-6 py-4 whitespace-nowrap text-right">
-                        <div
-                          className={`text-sm font-mono font-bold ${
-                            item.profit > 0 ? "text-green-400" : "text-red-400"
-                          }`}
-                        >
-                          ${Number(item.profit || 0).toFixed(2)}
+                        <div className={`text-sm font-mono font-bold ${item.profit > 0 ? "text-green-400" : "text-red-400"}`}>
+                          ${Number(item.profit).toFixed(2)}
                         </div>
                       </td>
 
                       {/* Quantity */}
                       <td className="px-6 py-4 whitespace-nowrap text-center">
-                        <div className="text-sm text-gray-300">{item.quantity || 0}</div>
+                        <div className="text-sm text-gray-300">{item.quantity}</div>
                         <div className="w-full bg-gray-800 rounded-full h-1 mt-1">
-                          <div
-                            className="bg-indigo-500 h-1 rounded-full"
-                            style={{ width: `${Math.min((item.quantity || 0) / 2, 100)}%` }}
-                          ></div>
+                          <div className="bg-indigo-500 h-1 rounded-full" style={{ width: `${Math.min((item.quantity || 0) * 2, 100)}%` }} />
                         </div>
                       </td>
 
@@ -324,8 +307,8 @@ const App = () => {
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                         <button
                           className="text-indigo-400 hover:text-indigo-300 bg-indigo-900/20 p-2 rounded-lg hover:bg-indigo-900/40 transition-colors"
-                          onClick={() => window.open(item.wmUrl || "https://white.market/", "_blank")}
-                          title="Open on White.Market"
+                          onClick={() => item.wmUrl && window.open(item.wmUrl, "_blank")}
+                          title={item.wmUrl || "No link"}
                         >
                           <ExternalLink size={16} />
                         </button>
@@ -347,11 +330,10 @@ const App = () => {
             </table>
           </div>
 
-          {/* Footer */}
           <div className="bg-[#151619] px-4 py-3 border-t border-gray-800 flex items-center justify-between sm:px-6">
-            <p className="text-sm text-gray-500">
+            <div className="text-sm text-gray-500">
               Showing <span className="font-medium text-gray-300">{processedData.length}</span> results
-            </p>
+            </div>
           </div>
         </div>
       </main>
@@ -359,7 +341,6 @@ const App = () => {
   );
 };
 
-// Sub-components
 const StatCard = ({ label, value, icon, color }) => (
   <div className="bg-[#1a1b1e] p-4 rounded-xl border border-gray-800 flex items-center justify-between hover:border-gray-700 transition-colors">
     <div>
@@ -381,11 +362,7 @@ const Th = ({ label, sortKey, onClick, sortConfig, align = "left" }) => {
       className={`px-6 py-4 text-${align} text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-indigo-400 transition-colors select-none group`}
       onClick={onClick}
     >
-      <div
-        className={`flex items-center gap-2 ${
-          align === "right" ? "justify-end" : align === "center" ? "justify-center" : "justify-start"
-        }`}
-      >
+      <div className={`flex items-center gap-2 ${align === "right" ? "justify-end" : align === "center" ? "justify-center" : "justify-start"}`}>
         {label}
         <span className={`transform transition-opacity ${isActive ? "opacity-100" : "opacity-0 group-hover:opacity-50"}`}>
           <ArrowUpDown size={14} className={isActive && sortConfig.direction === "asc" ? "transform rotate-180" : ""} />
