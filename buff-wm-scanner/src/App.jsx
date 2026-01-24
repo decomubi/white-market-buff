@@ -1,42 +1,34 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { Search, ArrowUpDown, TrendingUp, Box, RefreshCw, Filter, ExternalLink } from 'lucide-react';
-
-// Keep mock as fallback (if backend fails)
-const MOCK_DATA = [
-  {
-    id: 1,
-    name: "AK-47 | Redline",
-    wear: "Field-Tested",
-    image:
-      "https://community.cloudflare.steamstatic.com/economy/image/-9a81dlWLwJ2UUGcVs_nsVtzdOEdtWwKGZZLQHTxDZ7I56KU0Zwwo4NUX4oFJZEHLbXH5ApeO4YmlhxYQknCRvCo04DEVlxkKgpot7HxfDhjxszJemkV09-5lpKKqPrxN7LEmyVQ7MEpiLuSrYmnjQO3-UdsZGrwIdKQegA4N1iF_gDQyL3n1sS56M_LznygnXP-n1DwJzs",
-    buffPrice: 14.5,
-    wmPrice: 18.2,
-    quantity: 124,
-    fx: 0.14,
-    wmUrl: "https://white.market/search?search=AK-47%20%7C%20Redline"
-  },
-];
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  Search,
+  ArrowUpDown,
+  TrendingUp,
+  Box,
+  RefreshCw,
+  Filter,
+  ExternalLink,
+} from "lucide-react";
 
 const App = () => {
-  const [searchTerm, setSearchTerm] = useState('');
-  const [sortConfig, setSortConfig] = useState({ key: 'spread', direction: 'desc' });
+  const [searchTerm, setSearchTerm] = useState("");
+  const [sortConfig, setSortConfig] = useState({ key: "spread", direction: "desc" });
   const [loading, setLoading] = useState(false);
-  const [items, setItems] = useState(MOCK_DATA);
+  const [items, setItems] = useState([]);
 
-  // ✅ Upgrade 2: toggles
-  const [onlyProfitable, setOnlyProfitable] = useState(true);
-  const [hideNoBuyOrders, setHideNoBuyOrders] = useState(true);
+  // ✅ upgrades
+  const [hideZeroBuyOrders, setHideZeroBuyOrders] = useState(true);
+  const [onlyProfitable, setOnlyProfitable] = useState(false);
 
-  // Fetch from Netlify Function
   const fetchData = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/.netlify/functions/scan?limit=30`);
+      const res = await fetch("/.netlify/functions/scan?limit=50");
       const data = await res.json();
-      if (data?.ok) setItems(data.items || []);
+      if (!data.ok) throw new Error(data.error || "Failed");
+      setItems(data.items || []);
     } catch (e) {
       console.error(e);
-      // keep current items
+      alert("Scan failed: " + (e?.message || e));
     } finally {
       setLoading(false);
     }
@@ -44,68 +36,58 @@ const App = () => {
 
   useEffect(() => {
     fetchData();
+    // eslint-disable-next-line
   }, []);
 
-  // --- Helpers ---
-  // BUFF is CNY, WM is USD
-  // Convert BUFF to USD using fx (env FX_CNYUSD returned as item.fx)
-  const calculateMetrics = (item) => {
-    const fx = Number(item.fx ?? 0.14);
-    const buffUsd = Number(item.buffPrice || 0) * fx;
-    const wmUsd = Number(item.wmPrice || 0);
-
-    const profit = wmUsd - buffUsd;
-    const spread = buffUsd > 0 ? ((wmUsd - buffUsd) / buffUsd) * 100 : 0;
-
-    return { ...item, profit, spread, buffUsd };
-  };
-
   const processedData = useMemo(() => {
-    let data = items.map(calculateMetrics);
+    let data = [...items];
 
-    // ✅ Upgrade 2 filters
-    if (hideNoBuyOrders) {
-      data = data.filter(item => Number(item.wmPrice || 0) > 0);
+    // Filters
+    if (hideZeroBuyOrders) {
+      data = data.filter((i) => Number(i.wmPrice || 0) > 0);
     }
     if (onlyProfitable) {
-      data = data.filter(item => Number(item.profit || 0) > 0);
+      data = data.filter((i) => Number(i.profit || 0) > 0);
     }
 
-    // Search Filtering
     if (searchTerm) {
-      const lowerTerm = searchTerm.toLowerCase();
-      data = data.filter(item =>
-        String(item.name).toLowerCase().includes(lowerTerm) ||
-        String(item.wear).toLowerCase().includes(lowerTerm)
+      const t = searchTerm.toLowerCase();
+      data = data.filter(
+        (i) =>
+          (i.name || "").toLowerCase().includes(t) ||
+          (i.wear || "").toLowerCase().includes(t)
       );
     }
 
     // Sorting
     if (sortConfig.key) {
       data.sort((a, b) => {
-        if (a[sortConfig.key] < b[sortConfig.key]) return sortConfig.direction === 'asc' ? -1 : 1;
-        if (a[sortConfig.key] > b[sortConfig.key]) return sortConfig.direction === 'asc' ? 1 : -1;
+        const av = a[sortConfig.key];
+        const bv = b[sortConfig.key];
+        if (av < bv) return sortConfig.direction === "asc" ? -1 : 1;
+        if (av > bv) return sortConfig.direction === "asc" ? 1 : -1;
         return 0;
       });
     }
 
     return data;
-  }, [items, searchTerm, sortConfig, hideNoBuyOrders, onlyProfitable]);
+  }, [items, searchTerm, sortConfig, hideZeroBuyOrders, onlyProfitable]);
 
   const handleSort = (key) => {
-    let direction = 'desc';
-    if (sortConfig.key === key && sortConfig.direction === 'desc') direction = 'asc';
+    let direction = "desc";
+    if (sortConfig.key === key && sortConfig.direction === "desc") direction = "asc";
     setSortConfig({ key, direction });
   };
 
-  const refreshData = async () => {
-    await fetchData();
-  };
+  const avgSpread =
+    processedData.length > 0
+      ? processedData.reduce((acc, x) => acc + Number(x.spread || 0), 0) / processedData.length
+      : 0;
+
+  const totalVolume = processedData.reduce((acc, x) => acc + Number(x.quantity || 0), 0);
 
   return (
     <div className="min-h-screen bg-[#121212] text-gray-200 font-sans selection:bg-indigo-500 selection:text-white">
-
-      {/* Navbar */}
       <nav className="border-b border-gray-800 bg-[#1a1b1e] sticky top-0 z-10 shadow-lg">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
@@ -135,45 +117,48 @@ const App = () => {
         </div>
       </nav>
 
-      {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-
-        {/* Stats Row */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
           <StatCard
             label="Profitable Flips"
-            value={processedData.filter(i => i.profit > 0).length}
+            value={processedData.filter((i) => Number(i.profit || 0) > 0).length}
             icon={<TrendingUp size={18} />}
             color="text-green-400"
           />
           <StatCard
             label="Avg. Spread"
-            value={`${(processedData.reduce((acc, curr) => acc + curr.spread, 0) / processedData.length || 0).toFixed(2)}%`}
+            value={`${avgSpread.toFixed(2)}%`}
             icon={<Box size={18} />}
             color="text-blue-400"
           />
           <StatCard
             label="Total Volume"
-            value={processedData.reduce((acc, curr) => acc + (Number(curr.quantity) || 0), 0)}
+            value={totalVolume}
             icon={<Filter size={18} />}
             color="text-purple-400"
           />
           <div
             className="bg-[#1a1b1e] p-4 rounded-xl border border-gray-800 flex items-center justify-between hover:border-gray-700 transition-colors cursor-pointer group"
-            onClick={refreshData}
+            onClick={fetchData}
           >
             <div>
-              <p className="text-gray-500 text-xs font-medium uppercase tracking-wider">Data Status</p>
+              <p className="text-gray-500 text-xs font-medium uppercase tracking-wider">
+                Data Status
+              </p>
               <p className="text-xl font-bold text-white mt-1 group-hover:text-indigo-400 transition-colors">
                 {loading ? "Updating..." : "Up to Date"}
               </p>
             </div>
-            <RefreshCw size={24} className={`text-gray-500 group-hover:text-indigo-400 transition-all ${loading ? 'animate-spin' : ''}`} />
+            <RefreshCw
+              size={24}
+              className={`text-gray-500 group-hover:text-indigo-400 transition-all ${
+                loading ? "animate-spin" : ""
+              }`}
+            />
           </div>
         </div>
 
-        {/* Filters */}
-        <div className="flex flex-col sm:flex-row gap-4 mb-6">
+        <div className="flex flex-col sm:flex-row gap-4 mb-2">
           <div className="relative flex-grow">
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
               <Search size={18} className="text-gray-500" />
@@ -185,27 +170,6 @@ const App = () => {
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
             />
-
-            {/* ✅ Upgrade 2 toggles */}
-            <div className="flex gap-4 mt-3 text-sm text-gray-400">
-              <label className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={hideNoBuyOrders}
-                  onChange={(e) => setHideNoBuyOrders(e.target.checked)}
-                />
-                Hide $0 buy orders
-              </label>
-
-              <label className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={onlyProfitable}
-                  onChange={(e) => setOnlyProfitable(e.target.checked)}
-                />
-                Only profitable
-              </label>
-            </div>
           </div>
 
           <button className="flex items-center justify-center gap-2 px-6 py-3 border border-gray-800 text-sm font-medium rounded-xl text-gray-300 bg-[#1a1b1e] hover:bg-[#25262b] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 focus:ring-offset-[#121212] transition-colors">
@@ -214,19 +178,41 @@ const App = () => {
           </button>
         </div>
 
-        {/* Data Table */}
+        {/* ✅ Upgrades UI */}
+        <div className="flex flex-wrap gap-6 items-center mb-6 text-sm text-gray-400">
+          <label className="flex items-center gap-2 select-none cursor-pointer">
+            <input
+              type="checkbox"
+              checked={hideZeroBuyOrders}
+              onChange={(e) => setHideZeroBuyOrders(e.target.checked)}
+            />
+            Hide $0 buy orders
+          </label>
+
+          <label className="flex items-center gap-2 select-none cursor-pointer">
+            <input
+              type="checkbox"
+              checked={onlyProfitable}
+              onChange={(e) => setOnlyProfitable(e.target.checked)}
+            />
+            Only profitable
+          </label>
+        </div>
+
         <div className="bg-[#1a1b1e] rounded-xl border border-gray-800 shadow-xl overflow-hidden">
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-800">
               <thead className="bg-[#151619]">
                 <tr>
-                  <Th label="Item Details" sortKey="name" onClick={() => handleSort('name')} sortConfig={sortConfig} align="left" />
-                  <Th label="Buff163 Price" sortKey="buffPrice" onClick={() => handleSort('buffPrice')} sortConfig={sortConfig} align="right" />
-                  <Th label="WM Buy Order" sortKey="wmPrice" onClick={() => handleSort('wmPrice')} sortConfig={sortConfig} align="right" />
-                  <Th label="Spread" sortKey="spread" onClick={() => handleSort('spread')} sortConfig={sortConfig} align="right" />
-                  <Th label="Net Profit" sortKey="profit" onClick={() => handleSort('profit')} sortConfig={sortConfig} align="right" />
-                  <Th label="Quantity" sortKey="quantity" onClick={() => handleSort('quantity')} sortConfig={sortConfig} align="center" />
-                  <th className="px-6 py-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                  <Th label="Item Details" sortKey="name" onClick={() => handleSort("name")} sortConfig={sortConfig} align="left" />
+                  <Th label="Buff163 Price" sortKey="buffPrice" onClick={() => handleSort("buffPrice")} sortConfig={sortConfig} align="right" />
+                  <Th label="WM Buy Offer" sortKey="wmPrice" onClick={() => handleSort("wmPrice")} sortConfig={sortConfig} align="right" />
+                  <Th label="Spread" sortKey="spread" onClick={() => handleSort("spread")} sortConfig={sortConfig} align="right" />
+                  <Th label="Net Profit" sortKey="profit" onClick={() => handleSort("profit")} sortConfig={sortConfig} align="right" />
+                  <Th label="Quantity" sortKey="quantity" onClick={() => handleSort("quantity")} sortConfig={sortConfig} align="center" />
+                  <th className="px-6 py-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Actions
+                  </th>
                 </tr>
               </thead>
 
@@ -234,21 +220,25 @@ const App = () => {
                 {processedData.length > 0 ? (
                   processedData.map((item) => (
                     <tr key={item.id} className="hover:bg-[#202124] transition-colors group">
-
-                      {/* Item Info */}
                       <td className="px-6 py-4 whitespace-nowrap">
                         <div className="flex items-center">
                           <div className="flex-shrink-0 h-12 w-16 relative bg-gray-800 rounded-md flex items-center justify-center overflow-hidden border border-gray-700">
-                            <img className="h-full object-contain transform group-hover:scale-110 transition-transform duration-300" src={item.image} alt="" />
+                            <img
+                              className="h-full object-contain transform group-hover:scale-110 transition-transform duration-300"
+                              src={item.image}
+                              alt=""
+                            />
                           </div>
                           <div className="ml-4">
                             <div className="text-sm font-medium text-white">{item.name}</div>
-                            <div className="text-xs text-gray-500 flex items-center gap-2">{item.wear}</div>
+                            <div className="text-xs text-gray-500 flex items-center gap-2">
+                              {item.wear || "—"}
+                            </div>
                           </div>
                         </div>
                       </td>
 
-                      {/* Buff Price */}
+                      {/* Buff Price (CNY) */}
                       <td className="px-6 py-4 whitespace-nowrap text-right">
                         <div className="flex items-center justify-end text-sm text-gray-300 font-mono">
                           <span className="text-xs text-gray-600 mr-1">¥</span>
@@ -257,49 +247,57 @@ const App = () => {
                         <div className="text-[10px] text-gray-500">Listing</div>
                       </td>
 
-                      {/* WM Price */}
+                      {/* WM Buy Offer (USD) */}
                       <td className="px-6 py-4 whitespace-nowrap text-right">
                         <div className="flex items-center justify-end text-sm text-gray-300 font-mono">
                           <span className="text-xs text-gray-600 mr-1">$</span>
                           {Number(item.wmPrice || 0).toFixed(2)}
                         </div>
-                        <div className="text-[10px] text-gray-500">Buy Order</div>
+                        <div className="text-[10px] text-gray-500">Buy Offer</div>
                       </td>
 
-                      {/* Spread */}
                       <td className="px-6 py-4 whitespace-nowrap text-right">
-                        <span className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-md ${item.spread > 0 ? 'bg-green-900/30 text-green-400 border border-green-900' : 'bg-red-900/30 text-red-400 border border-red-900'}`}>
-                          {item.spread > 0 ? '+' : ''}{Number(item.spread || 0).toFixed(2)}%
+                        <span
+                          className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-md ${
+                            Number(item.spread || 0) > 0
+                              ? "bg-green-900/30 text-green-400 border border-green-900"
+                              : "bg-red-900/30 text-red-400 border border-red-900"
+                          }`}
+                        >
+                          {Number(item.spread || 0) > 0 ? "+" : ""}
+                          {Number(item.spread || 0).toFixed(2)}%
                         </span>
                       </td>
 
-                      {/* Profit */}
                       <td className="px-6 py-4 whitespace-nowrap text-right">
-                        <div className={`text-sm font-mono font-bold ${item.profit > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        <div
+                          className={`text-sm font-mono font-bold ${
+                            Number(item.profit || 0) > 0 ? "text-green-400" : "text-red-400"
+                          }`}
+                        >
                           ${Number(item.profit || 0).toFixed(2)}
                         </div>
                       </td>
 
-                      {/* Quantity */}
                       <td className="px-6 py-4 whitespace-nowrap text-center">
-                        <div className="text-sm text-gray-300">{Number(item.quantity || 0)}</div>
+                        <div className="text-sm text-gray-300">{item.quantity}</div>
                         <div className="w-full bg-gray-800 rounded-full h-1 mt-1">
-                          <div className="bg-indigo-500 h-1 rounded-full" style={{ width: `${Math.min(Number(item.quantity || 0) * 2, 100)}%` }} />
+                          <div
+                            className="bg-indigo-500 h-1 rounded-full"
+                            style={{ width: `${Math.min(Number(item.quantity || 0) * 2, 100)}%` }}
+                          ></div>
                         </div>
                       </td>
 
-                      {/* Actions */}
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                        <a
-                          href={item.wmUrl || "https://white.market/"}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-indigo-400 hover:text-indigo-300 bg-indigo-900/20 p-2 rounded-lg hover:bg-indigo-900/40 transition-colors inline-flex"
+                        <button
+                          className="text-indigo-400 hover:text-indigo-300 bg-indigo-900/20 p-2 rounded-lg hover:bg-indigo-900/40 transition-colors"
+                          onClick={() => window.open(item.wmUrl || "https://white.market/", "_blank")}
+                          title="Open on White.Market"
                         >
                           <ExternalLink size={16} />
-                        </a>
+                        </button>
                       </td>
-
                     </tr>
                   ))
                 ) : (
@@ -308,7 +306,7 @@ const App = () => {
                       <div className="flex flex-col items-center justify-center">
                         <Search size={48} className="text-gray-700 mb-4" />
                         <p className="text-lg font-medium">No items found</p>
-                        <p className="text-sm">Try adjusting your filters/search</p>
+                        <p className="text-sm">Try adjusting your search terms</p>
                       </div>
                     </td>
                   </tr>
@@ -317,58 +315,30 @@ const App = () => {
             </table>
           </div>
 
-          {/* Footer */}
           <div className="bg-[#151619] px-4 py-3 border-t border-gray-800 flex items-center justify-between sm:px-6">
-            <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
-              <div>
-                <p className="text-sm text-gray-500">
-                  Showing <span className="font-medium text-gray-300">1</span> to{" "}
-                  <span className="font-medium text-gray-300">{processedData.length}</span> of{" "}
-                  <span className="font-medium text-gray-300">{items.length}</span> results
-                </p>
-              </div>
-              <div>
-                <nav className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
-                  <button className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-700 bg-[#1a1b1e] text-sm font-medium text-gray-400 hover:bg-[#25262b]">
-                    Previous
-                  </button>
-                  <button className="relative inline-flex items-center px-4 py-2 border border-gray-700 bg-[#25262b] text-sm font-medium text-white">
-                    1
-                  </button>
-                  <button className="relative inline-flex items-center px-4 py-2 border border-gray-700 bg-[#1a1b1e] text-sm font-medium text-gray-400 hover:bg-[#25262b]">
-                    2
-                  </button>
-                  <button className="relative inline-flex items-center px-4 py-2 border border-gray-700 bg-[#1a1b1e] text-sm font-medium text-gray-400 hover:bg-[#25262b]">
-                    3
-                  </button>
-                  <button className="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-700 bg-[#1a1b1e] text-sm font-medium text-gray-400 hover:bg-[#25262b]">
-                    Next
-                  </button>
-                </nav>
-              </div>
-            </div>
+            <p className="text-sm text-gray-500">
+              Showing <span className="font-medium text-gray-300">{processedData.length}</span> results
+            </p>
           </div>
-
         </div>
       </main>
     </div>
   );
 };
 
-// Sub-components
 const StatCard = ({ label, value, icon, color }) => (
   <div className="bg-[#1a1b1e] p-4 rounded-xl border border-gray-800 flex items-center justify-between hover:border-gray-700 transition-colors">
     <div>
       <p className="text-gray-500 text-xs font-medium uppercase tracking-wider">{label}</p>
-      <p className={`text-2xl font-bold mt-1 ${color ? color : 'text-white'}`}>{value}</p>
+      <p className={`text-2xl font-bold mt-1 ${color ? color : "text-white"}`}>{value}</p>
     </div>
-    <div className={`p-3 rounded-lg bg-opacity-10 ${color ? color.replace('text-', 'bg-') : 'bg-gray-700'} ${color}`}>
+    <div className={`p-3 rounded-lg bg-opacity-10 ${color ? color.replace("text-", "bg-") : "bg-gray-700"} ${color}`}>
       {icon}
     </div>
   </div>
 );
 
-const Th = ({ label, sortKey, onClick, sortConfig, align = 'left' }) => {
+const Th = ({ label, sortKey, onClick, sortConfig, align = "left" }) => {
   const isActive = sortConfig.key === sortKey;
   return (
     <th
@@ -376,10 +346,18 @@ const Th = ({ label, sortKey, onClick, sortConfig, align = 'left' }) => {
       className={`px-6 py-4 text-${align} text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-indigo-400 transition-colors select-none group`}
       onClick={onClick}
     >
-      <div className={`flex items-center gap-2 ${align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'}`}>
+      <div
+        className={`flex items-center gap-2 ${
+          align === "right"
+            ? "justify-end"
+            : align === "center"
+            ? "justify-center"
+            : "justify-start"
+        }`}
+      >
         {label}
-        <span className={`transform transition-opacity ${isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-50'}`}>
-          <ArrowUpDown size={14} className={isActive && sortConfig.direction === 'asc' ? 'transform rotate-180' : ''} />
+        <span className={`transform transition-opacity ${isActive ? "opacity-100" : "opacity-0 group-hover:opacity-50"}`}>
+          <ArrowUpDown size={14} className={isActive && sortConfig.direction === "asc" ? "transform rotate-180" : ""} />
         </span>
       </div>
     </th>
