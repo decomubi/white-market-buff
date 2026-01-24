@@ -193,10 +193,13 @@ export async function handler(event) {
     const rows = buffItems
       .map((it) => {
         const goodsId = it?.id;
-        const nameHash = it?.market_hash_name || it?.name || it?.short_name;
-        if (!goodsId || !nameHash) return null;
+        const rawNameHash = it?.market_hash_name || it?.name || it?.short_name;
+        if (!goodsId || !rawNameHash) return null;
 
-        // IMPORTANT: use BUFF's sell_min_price from goods list (no sell_order endpoint)
+        // Normalize name a bit (helps with strict matching)
+        const nameHash = String(rawNameHash).replace(/\s+/g, " ").trim();
+
+        // Use BUFF's sell_min_price from goods list (no sell_order endpoint)
         const buffPriceCny =
           it?.sell_min_price != null ? Number(it.sell_min_price) :
           it?.sell_min_price_cny != null ? Number(it.sell_min_price_cny) :
@@ -217,6 +220,9 @@ export async function handler(event) {
           normalizeUrl(it?.img) ||
           "";
 
+        // ✅ Upgrade 1: Exact search link
+        const wmUrl = `https://white.market/search?search=${encodeURIComponent(nameHash)}`;
+
         return {
           id: goodsId,
           name: nameHash,
@@ -226,7 +232,7 @@ export async function handler(event) {
           wmPrice: 0,                   // USD (filled later)
           quantity: Number(quantity) || 0,
           fx,
-          wmUrl: `https://white.market/` // placeholder (keep simple)
+          wmUrl
         };
       })
       .filter(Boolean);
