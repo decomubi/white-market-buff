@@ -1,13 +1,11 @@
-// netlify/functions/scan.mjs
-// Buff163 -> White.Market scanner (Netlify Function, ESM)
+// netlify/functions/scan.mjs (DEBUG + correct WM buy offers)
 
 const BUFF_COOKIE = process.env.BUFF_COOKIE || "";
 const WM_PARTNER_TOKEN = process.env.WM_PARTNER_TOKEN || "";
-const FX_CNYUSD = Number(process.env.FX_CNYUSD || "0.14"); // 1 CNY -> USD
-const WM_FEE = Number(process.env.WM_FEE || "0.00"); // optional fee, e.g. 0.05 for 5%
+const FX_CNYUSD = Number(process.env.FX_CNYUSD || "0.14");
+const WM_FEE = Number(process.env.WM_FEE || "0.00");
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function withTimeout(ms) {
@@ -16,10 +14,17 @@ function withTimeout(ms) {
   return { signal: ctrl.signal, cancel: () => clearTimeout(t) };
 }
 
-async function fetchJson(url, opts = {}, timeoutMs = 15000) {
+async function fetchJson(url, opts = {}, timeoutMs = 20000, label = "fetch") {
   const { signal, cancel } = withTimeout(timeoutMs);
   try {
-    const res = await fetch(url, { ...opts, signal });
+    let res;
+    try {
+      res = await fetch(url, { ...opts, signal });
+    } catch (e) {
+      // ✅ THIS is the “fetch failed” root — now we expose where it happened
+      throw new Error(`${label}: fetch() failed for ${url} -> ${e?.message || e}`);
+    }
+
     const text = await res.text();
     let json = null;
     try {
@@ -33,7 +38,12 @@ async function fetchJson(url, opts = {}, timeoutMs = 15000) {
   }
 }
 
-// ---------- BUFF (best-effort parser; works with common Buff endpoints) ----------
+// ---------------- BUFF ----------------
+
+function extractWear(name = "") {
+  const m = name.match(/\(([^)]+)\)\s*$/);
+  return m ? m[1] : "";
+}
 
 function normalizeBuffIcon(url) {
   if (!url) return "";
@@ -42,14 +52,7 @@ function normalizeBuffIcon(url) {
   return "https://buff.163.com" + url;
 }
 
-function extractWear(name = "") {
-  // e.g. "AK-47 | Jaguar (Field-Tested)"
-  const m = name.match(/\(([^)]+)\)\s*$/);
-  return m ? m[1] : "";
-}
-
 function parseBuffItems(payload) {
-  // Buff responses vary; try common shapes:
   const candidates =
     payload?.data?.items ||
     payload?.data?.goods ||
@@ -112,25 +115,14 @@ function parseBuffItems(payload) {
 }
 
 async function fetchBuffTopList(limit) {
-  if (!BUFF_COOKIE) {
-    throw new Error("Missing BUFF_COOKIE env var");
-  }
+  if (!BUFF_COOKIE) throw new Error("Missing BUFF_COOKIE env var");
 
-  // Common Buff listing endpoint:
-  // NOTE: If your current project uses a different Buff endpoint, replace ONLY this URL,
-  // keep the rest unchanged.
   const url = new URL("https://buff.163.com/api/market/goods");
   url.searchParams.set("game", "csgo");
   url.searchParams.set("page_num", "1");
   url.searchParams.set("page_size", String(limit));
-  // You can change sort_by if you want:
-  // url.searchParams.set("sort_by", "price.desc");
 
-  // Retry on 429
-  let attempt = 0;
-  while (attempt < 4) {
-    attempt++;
-
+  for (let attempt = 1; attempt <= 4; attempt++) {
     const r = await fetchJson(
       url.toString(),
       {
@@ -143,12 +135,12 @@ async function fetchBuffTopList(limit) {
           referer: "https://buff.163.com/",
         },
       },
-      20000
+      20000,
+      "BUFF"
     );
 
     if (r.status === 429) {
-      // backoff
-      await sleep(600 * attempt);
+      await sleep(800 * attempt);
       continue;
     }
 
@@ -165,64 +157,82 @@ async function fetchBuffTopList(limit) {
   throw new Error("BUFF HTTP 429: rate limited");
 }
 
-// ---------- WHITE.MARKET (correct BUY OFFERS) ----------
+// ---------------- WHITE.MARKET ----------------
 
 async function wmGraphql(query, variables) {
-  if (!WM_PARTNER_TOKEN) {
-    throw new Error("Missing WM_PARTNER_TOKEN env var");
-  }
+  if (!WM_PARTNER_TOKEN) throw new Error("Missing WM_PARTNER_TOKEN env var");
 
-  const r = await fetchJson(
+  // ✅ Try both endpoints (some accounts behave differently)
+  const endpoints = [
+    "https://api.white.market/graphql/",
     "https://api.white.market/graphql",
-    {
-      method: "POST",
-      headers: {
-        ...JSON_HEADERS,
-        // Some partner setups accept Authorization; some accept x-partner-token.
-        // Sending both is safe.
-        authorization: `Bearer ${WM_PARTNER_TOKEN}`,
-        "x-partner-token": WM_PARTNER_TOKEN,
-      },
-      body: JSON.stringify({ query, variables }),
-    },
-    20000
-  );
+  ];
 
-  if (!r.ok || !r.json) {
-    throw new Error(`WM HTTP ${r.status}: ${r.text || "Unknown"}`);
+  let lastErr = null;
+
+  for (const endpoint of endpoints) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const r = await fetchJson(
+          endpoint,
+          {
+            method: "POST",
+            headers: {
+              ...JSON_HEADERS,
+              accept: "application/json",
+              authorization: `Bearer ${WM_PARTNER_TOKEN}`,
+              "x-partner-token": WM_PARTNER_TOKEN,
+            },
+            body: JSON.stringify({ query, variables }),
+          },
+          20000,
+          "WHITE.MARKET"
+        );
+
+        if (!r.ok || !r.json) {
+          // retry on 502/503/504
+          if ([502, 503, 504].includes(r.status) && attempt < 3) {
+            await sleep(600 * attempt);
+            continue;
+          }
+          throw new Error(`WM HTTP ${r.status}: ${r.text || "Unknown"}`);
+        }
+
+        if (r.json.errors?.length) {
+          throw new Error(`WM GraphQL: ${r.json.errors[0]?.message || "Unknown error"}`);
+        }
+
+        return r.json.data;
+      } catch (e) {
+        lastErr = e;
+        // small backoff then retry
+        await sleep(300 * attempt);
+      }
+    }
   }
-  if (r.json.errors?.length) {
-    throw new Error(`WM GraphQL: ${r.json.errors[0]?.message || "Unknown error"}`);
-  }
-  return r.json.data;
+
+  throw new Error(lastErr?.message || String(lastErr));
 }
 
 async function wmResolveProductByName(name) {
-  // Resolve the correct slug + strict nameHash by searching market_list with nameStrict
   const query = `
     query MarketList($search: MarketProductSearchInput!, $first: Int!) {
       market_list(search: $search, forwardPagination: { first: $first }) {
         edges {
           node {
             slug
-            item {
-              order { nameHash }  # sometimes present
-            }
-            description {
-              marketHashName
-              iconUrl
-            }
+            item { order { nameHash } }
+            description { marketHashName }
           }
         }
       }
     }
   `;
 
-  // For CS2, appId enum is usually CSGO in their docs.
   const data = await wmGraphql(query, {
     search: {
       appId: "CSGO",
-      name: name,
+      name,
       nameStrict: true,
       distinctValues: true,
       sort: { field: "CREATED", type: "DESC" },
@@ -234,8 +244,7 @@ async function wmResolveProductByName(name) {
   if (!node) return null;
 
   const slug = node.slug;
-  const nameHash =
-    node?.item?.order?.nameHash || node?.description?.marketHashName || name;
+  const nameHash = node?.item?.order?.nameHash || node?.description?.marketHashName || name;
 
   return {
     slug,
@@ -245,121 +254,4 @@ async function wmResolveProductByName(name) {
 }
 
 async function wmBestBuyOfferByNameHash(nameHash) {
-  // ✅ Correct: order_list sorted by PRICE DESC to get BEST buy offer (like the website)
-  const query = `
-    query BestBuy($search: MarketOrderPublicSearchInput!) {
-      order_list(search: $search, forwardPagination: { first: 1 }) {
-        edges {
-          node {
-            nameHash
-            quantity
-            price { value currency }
-          }
-        }
-      }
-    }
-  `;
-
-  const data = await wmGraphql(query, {
-    search: {
-      appId: "CSGO",
-      nameHash,
-      distinctValues: false,
-      sort: { field: "PRICE", type: "DESC" },
-    },
-  });
-
-  const node = data?.order_list?.edges?.[0]?.node;
-  if (!node) return { wmPrice: 0, wmQty: 0 };
-
-  const value = Number(node?.price?.value || 0);
-  const currency = node?.price?.currency || "USD";
-
-  // If you ever get non-USD here, you can filter currency === "USD"
-  // (Most partners receive USD already.)
-  const wmPrice = Number.isFinite(value) ? value : 0;
-
-  return { wmPrice, wmQty: Number(node?.quantity || 0), currency };
-}
-
-// ---------- MAIN HANDLER ----------
-
-export const handler = async (event) => {
-  try {
-    const limit = Math.min(
-      Math.max(Number(event.queryStringParameters?.limit || 30), 1),
-      100
-    );
-
-    const buffItems = await fetchBuffTopList(limit);
-
-    // Small delay helps reduce 429 spikes
-    const out = [];
-    for (const it of buffItems) {
-      // Resolve WM product for correct slug + nameHash
-      const wmProduct = await wmResolveProductByName(it.name);
-      await sleep(120);
-
-      let wmPrice = 0;
-      let wmQty = 0;
-      let wmUrl = "https://white.market/";
-      let nameHash = it.name;
-
-      if (wmProduct?.nameHash) {
-        nameHash = wmProduct.nameHash;
-        wmUrl = wmProduct.wmUrl;
-        const best = await wmBestBuyOfferByNameHash(nameHash);
-        wmPrice = best.wmPrice || 0;
-        wmQty = best.wmQty || 0;
-      }
-
-      // Convert buff CNY -> USD for comparison
-      const buffUsd = it.buffPrice * FX_CNYUSD;
-
-      // Profit is WM buy offer minus Buff cost (optionally subtract WM fee)
-      const wmNet = wmPrice * (1 - WM_FEE);
-      const profit = wmNet - buffUsd;
-      const spread = buffUsd > 0 ? (profit / buffUsd) * 100 : 0;
-
-      out.push({
-        id: it.id,
-        name: it.name,
-        wear: it.wear || "",
-        image: it.image || "",
-        buffPrice: it.buffPrice, // CNY
-        wmPrice: wmPrice, // USD (BUY OFFER)
-        wmQty: wmQty,
-        fx: FX_CNYUSD,
-        wmUrl,
-        profit,
-        spread,
-        quantity: it.quantity ?? 0,
-      });
-
-      await sleep(120);
-    }
-
-    return {
-      statusCode: 200,
-      headers: {
-        ...JSON_HEADERS,
-        "access-control-allow-origin": "*",
-        "cache-control": "no-store",
-      },
-      body: JSON.stringify({ ok: true, items: out }),
-    };
-  } catch (e) {
-    return {
-      statusCode: 200,
-      headers: {
-        ...JSON_HEADERS,
-        "access-control-allow-origin": "*",
-        "cache-control": "no-store",
-      },
-      body: JSON.stringify({
-        ok: false,
-        error: String(e?.message || e),
-      }),
-    };
-  }
-};
+  // ✅
