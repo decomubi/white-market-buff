@@ -254,4 +254,95 @@ async function wmResolveProductByName(name) {
 }
 
 async function wmBestBuyOfferByNameHash(nameHash) {
-  // ✅
+  // ✅ Correct Buy Offer = best price (DESC)
+  const query = `
+    query BestBuy($search: MarketOrderPublicSearchInput!) {
+      order_list(search: $search, forwardPagination: { first: 1 }) {
+        edges {
+          node {
+            quantity
+            price { value currency }
+          }
+        }
+      }
+    }
+  `;
+
+  const data = await wmGraphql(query, {
+    search: {
+      appId: "CSGO",
+      nameHash,
+      distinctValues: false,
+      sort: { field: "PRICE", type: "DESC" },
+    },
+  });
+
+  const node = data?.order_list?.edges?.[0]?.node;
+  if (!node) return { wmPrice: 0, wmQty: 0 };
+
+  return {
+    wmPrice: Number(node?.price?.value || 0) || 0,
+    wmQty: Number(node?.quantity || 0) || 0,
+  };
+}
+
+// ---------------- MAIN HANDLER ----------------
+
+export const handler = async (event) => {
+  try {
+    const limit = Math.min(Math.max(Number(event.queryStringParameters?.limit || 30), 1), 100);
+
+    const buffItems = await fetchBuffTopList(limit);
+
+    const out = [];
+    for (const it of buffItems) {
+      const wmProduct = await wmResolveProductByName(it.name);
+
+      let wmPrice = 0;
+      let wmQty = 0;
+      let wmUrl = "https://white.market/";
+
+      if (wmProduct?.nameHash) {
+        wmUrl = wmProduct.wmUrl;
+        const best = await wmBestBuyOfferByNameHash(wmProduct.nameHash);
+        wmPrice = best.wmPrice;
+        wmQty = best.wmQty;
+      }
+
+      const buffUsd = it.buffPrice * FX_CNYUSD;
+      const wmNet = wmPrice * (1 - WM_FEE);
+
+      const profit = wmNet - buffUsd;
+      const spread = buffUsd > 0 ? (profit / buffUsd) * 100 : 0;
+
+      out.push({
+        id: it.id,
+        name: it.name,
+        wear: it.wear || "",
+        image: it.image || "",
+        buffPrice: it.buffPrice, // CNY
+        wmPrice, // USD buy offer
+        wmQty,
+        fx: FX_CNYUSD,
+        wmUrl,
+        profit,
+        spread,
+        quantity: it.quantity ?? 0,
+      });
+
+      await sleep(80);
+    }
+
+    return {
+      statusCode: 200,
+      headers: { ...JSON_HEADERS, "access-control-allow-origin": "*", "cache-control": "no-store" },
+      body: JSON.stringify({ ok: true, items: out }),
+    };
+  } catch (e) {
+    return {
+      statusCode: 200,
+      headers: { ...JSON_HEADERS, "access-control-allow-origin": "*", "cache-control": "no-store" },
+      body: JSON.stringify({ ok: false, error: String(e?.message || e) }),
+    };
+  }
+};
