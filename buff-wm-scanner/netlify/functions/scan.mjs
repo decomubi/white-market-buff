@@ -1,10 +1,8 @@
 // netlify/functions/scan.mjs
-// Buff163 -> WhiteMarket scanner (Netlify Function)
-// Env needed in Netlify:
-//   BUFF_COOKIE        = your Buff cookie string
-//   WM_PARTNER_TOKEN   = your WhiteMarket partner token
-// Optional:
-//   FX_CNYUSD          = number like 0.14 (used only for display math in frontend)
+// FIXED:
+// - WM auth: removed accessTokenExpiredAt (schema changed)
+// - WM endpoint: /graphql/partner (works)
+// - BUFF price normalization: fixes x100 prices
 
 const WM_GQL = "https://api.white.market/graphql/partner";
 
@@ -26,6 +24,19 @@ function json(statusCode, obj) {
   };
 }
 
+// Heuristic to fix BUFF returning price * 100 sometimes.
+// If price is insanely large, divide by 100.
+function normalizeBuffPriceCNY(raw) {
+  let n = Number(raw);
+  if (!Number.isFinite(n)) return 0;
+
+  // If BUFF gave an integer like 3499985 for a 34999.85 item, fix it.
+  // Anything > 200000 is almost surely "cents" (>= 2000 CNY * 100).
+  if (n > 200000) n = n / 100;
+
+  return n;
+}
+
 async function wmGetAccessToken() {
   const partnerToken = process.env.WM_PARTNER_TOKEN;
   if (!partnerToken) throw new Error("Missing env: WM_PARTNER_TOKEN");
@@ -35,11 +46,11 @@ async function wmGetAccessToken() {
     return wmCached.accessToken;
   }
 
+  // IMPORTANT: WM schema no longer has accessTokenExpiredAt.
   const query = `
     mutation AuthToken {
       auth_token {
         accessToken
-        accessTokenExpiredAt
       }
     }
   `;
@@ -48,15 +59,13 @@ async function wmGetAccessToken() {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-partner-token": partnerToken, // partner auth header
+      "x-partner-token": partnerToken,
     },
     body: JSON.stringify({ query }),
   });
 
   const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`WM auth HTTP ${res.status}: ${text.slice(0, 300)}`);
-  }
+  if (!res.ok) throw new Error(`WM auth HTTP ${res.status}: ${text.slice(0, 300)}`);
 
   let data;
   try {
@@ -70,21 +79,19 @@ async function wmGetAccessToken() {
   }
 
   const token = data?.data?.auth_token?.accessToken;
-  const expiresAtStr = data?.data?.auth_token?.accessTokenExpiredAt;
-
   if (!token) throw new Error("WM auth: no accessToken returned");
 
-  // cache ~23 hours (safe)
+  // Cache token for 20 minutes (safe + simple)
   wmCached.accessToken = token;
-  wmCached.expiresAt = expiresAtStr ? Date.parse(expiresAtStr) : Date.now() + 23 * 60 * 60 * 1000;
+  wmCached.expiresAt = Date.now() + 20 * 60 * 1000;
 
   return token;
 }
 
 async function wmFetchBestOffer(nameHash) {
-  // Uses offerMinPrice = best buy offer price (what you see in “Buy offers”)
   const accessToken = await wmGetAccessToken();
 
+  // offerMinPrice = best buy offer price (matches “Buy offers”)
   const query = `
     query MarketList($search: MarketProductSearchInput) {
       market_list(search: $search, pagination: { first: 1 }) {
@@ -105,8 +112,6 @@ async function wmFetchBestOffer(nameHash) {
       nameHash,
       nameStrict: true,
       distinctValues: true,
-      // IMPORTANT: offerType can change results; leaving it empty returns general offers.
-      // offerType: "BARGAIN"
     },
   };
 
@@ -120,9 +125,7 @@ async function wmFetchBestOffer(nameHash) {
   });
 
   const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`WM HTTP ${res.status}: ${text.slice(0, 300)}`);
-  }
+  if (!res.ok) throw new Error(`WM HTTP ${res.status}: ${text.slice(0, 300)}`);
 
   let data;
   try {
@@ -136,15 +139,17 @@ async function wmFetchBestOffer(nameHash) {
   }
 
   const node = data?.data?.market_list?.edges?.[0]?.node;
-  if (!node) {
-    return { wmPrice: 0, wmUrl: "", wmCurrency: "USD" };
-  }
+  if (!node) return { wmPrice: 0, wmUrl: "", wmCurrency: "USD" };
 
   const wmPrice = Number(node?.offerMinPrice?.value ?? 0);
   const wmCurrency = node?.offerMinPrice?.currency ?? "USD";
   const wmUrl = node?.slug ? `https://white.market/item/${node.slug}` : "";
 
-  return { wmPrice: Number.isFinite(wmPrice) ? wmPrice : 0, wmUrl, wmCurrency };
+  return {
+    wmPrice: Number.isFinite(wmPrice) ? wmPrice : 0,
+    wmUrl,
+    wmCurrency,
+  };
 }
 
 async function buffFetchTop(limit) {
@@ -168,10 +173,7 @@ async function buffFetchTop(limit) {
   });
 
   const text = await res.text();
-  if (!res.ok) {
-    // Buff often throws 429
-    throw new Error(`BUFF HTTP ${res.status}: ${text.slice(0, 200)}`);
-  }
+  if (!res.ok) throw new Error(`BUFF HTTP ${res.status}: ${text.slice(0, 200)}`);
 
   let data;
   try {
@@ -182,7 +184,6 @@ async function buffFetchTop(limit) {
 
   const items = data?.data?.items || [];
   return items.map((it) => {
-    // Buff fields differ by item type; keep it safe
     const name = it?.name || it?.market_hash_name || "Unknown";
     const image =
       it?.goods_info?.icon_url ||
@@ -191,15 +192,17 @@ async function buffFetchTop(limit) {
       it?.goods_info?.original_icon_url ||
       "";
 
-    const priceCny =
-      Number(it?.sell_min_price ?? it?.min_price ?? it?.price ?? 0) || 0;
-    const quantity =
-      Number(it?.sell_num ?? it?.num ?? it?.market_count ?? 0) || 0;
+    const rawPrice =
+      it?.sell_min_price ?? it?.min_price ?? it?.price ?? 0;
+
+    const priceCny = normalizeBuffPriceCNY(rawPrice);
+
+    const quantity = Number(it?.sell_num ?? it?.num ?? it?.market_count ?? 0) || 0;
 
     return {
       id: it?.id ?? it?.goods_id ?? null,
       name,
-      wear: "-", // keep simple; your UI can ignore for stickers/cases
+      wear: "-",
       image,
       buffPrice: priceCny,
       quantity,
@@ -216,20 +219,20 @@ export async function handler(event) {
 
     const fx = Number(process.env.FX_CNYUSD || "0.14");
 
-    // 1) Get items from BUFF
     const buffItems = await buffFetchTop(limit);
 
-    // 2) Match each item on WhiteMarket by strict nameHash
     const out = [];
     for (const item of buffItems) {
-      const nameHash = item.name; // Buff name already includes (Field-Tested) etc in many cases
       let wm = { wmPrice: 0, wmUrl: "", wmCurrency: "USD" };
-
       try {
-        wm = await wmFetchBestOffer(nameHash);
+        wm = await wmFetchBestOffer(item.name);
       } catch (e) {
-        // If WM fails for one item, keep going
-        wm = { wmPrice: 0, wmUrl: "", wmCurrency: "USD", wmError: String(e?.message || e) };
+        wm = {
+          wmPrice: 0,
+          wmUrl: "",
+          wmCurrency: "USD",
+          wmError: String(e?.message || e),
+        };
       }
 
       out.push({
