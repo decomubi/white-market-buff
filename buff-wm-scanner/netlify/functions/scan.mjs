@@ -1,26 +1,25 @@
 // netlify/functions/scan.mjs
+// Netlify Function (NOT Edge). Must return { statusCode, headers, body }.
 // BUFF163 (CNY) -> White.Market (USD Buy Offer)
-// - BUFF: uses cookie auth (BUFF_COOKIE env)
-// - WM: uses partner GraphQL (WM_PARTNER_TOKEN env) + offerMinPrice (best buy offer)
 
 const BUFF_URL = "https://buff.163.com/api/market/goods";
 
 const WM_ENDPOINTS = [
   "https://api.white.market/graphql/partner",
-  // fallback (in case they change routing):
   "https://api.white.market/graphql/partner/",
 ];
 
 const DEFAULT_LIMIT = 30;
 
-function json(res, status = 200) {
-  return new Response(JSON.stringify(res), {
-    status,
+function reply(statusCode, data) {
+  return {
+    statusCode,
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
     },
-  });
+    body: JSON.stringify(data),
+  };
 }
 
 function sleep(ms) {
@@ -31,45 +30,39 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
-    return res;
+    return await fetch(url, { ...options, signal: controller.signal });
   } finally {
     clearTimeout(id);
   }
 }
 
 async function buffFetchTop({ limit, cookie }) {
-  // NOTE: BUFF API fields can differ slightly per response.
-  // This version targets the common "goods" endpoint fields.
   const url = new URL(BUFF_URL);
   url.searchParams.set("game", "csgo");
   url.searchParams.set("page_num", "1");
-  url.searchParams.set("page_size", String(Math.min(Math.max(limit, 1), 200)));
-  url.searchParams.set("sort_by", "price.desc"); // common sort (ok if ignored)
+  url.searchParams.set("page_size", String(Math.min(Math.max(limit, 1), 100)));
 
-  // Buff can rate-limit (429). We'll retry a bit (polite).
   const headers = {
     "user-agent":
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-    "accept": "application/json, text/plain, */*",
-    "referer": "https://buff.163.com/market/csgo",
-    "cookie": cookie,
+    accept: "application/json, text/plain, */*",
+    referer: "https://buff.163.com/market/csgo",
+    cookie,
   };
 
   let lastErr = null;
+
   for (let attempt = 0; attempt < 3; attempt++) {
     const res = await fetchWithTimeout(url.toString(), { headers }, 15000);
     const text = await res.text();
 
     if (res.status === 429) {
       lastErr = new Error(`BUFF HTTP 429: ${text}`);
-      await sleep(600 * (attempt + 1));
+      await sleep(700 * (attempt + 1));
       continue;
     }
 
-    if (!res.ok) {
-      throw new Error(`BUFF HTTP ${res.status}: ${text}`);
-    }
+    if (!res.ok) throw new Error(`BUFF HTTP ${res.status}: ${text}`);
 
     let data;
     try {
@@ -84,9 +77,8 @@ async function buffFetchTop({ limit, cookie }) {
 
     const items = Array.isArray(data.data.items) ? data.data.items : [];
 
-    // Normalize to what frontend expects
     return items.map((it) => {
-      const goodsId = it.id ?? it.goods_id ?? it.goodsId ?? null;
+      const goodsId = it.id ?? it.goods_id ?? it.goodsId ?? it.name;
       const name = it.name ?? it.goods_info?.name ?? it.market_hash_name ?? "";
       const icon =
         it.goods_info?.icon_url ??
@@ -94,22 +86,19 @@ async function buffFetchTop({ limit, cookie }) {
         it.icon_url ??
         it.icon ??
         "";
-      const price =
-        Number(it.sell_min_price ?? it.sell_min_price_cny ?? it.min_price ?? 0) ||
-        0;
-      const qty = Number(it.sell_num ?? it.sell_num_count ?? it.sell_count ?? 0) || 0;
+
+      const buffPrice =
+        Number(it.sell_min_price ?? it.min_price ?? it.sell_min_price_cny ?? 0) || 0;
+
+      const quantity = Number(it.sell_num ?? it.sell_count ?? 0) || 0;
 
       return {
-        id: goodsId ?? name,
+        id: goodsId,
         name,
-        wear: "-", // optional; BUFF doesn't always provide wear separately
-        image: icon.startsWith("http")
-          ? icon
-          : icon
-          ? `https:${icon}`
-          : "",
-        buffPrice: price, // CNY
-        quantity: qty,
+        wear: "-",
+        image: icon.startsWith("http") ? icon : icon ? `https:${icon}` : "",
+        buffPrice, // CNY
+        quantity,
       };
     });
   }
@@ -117,20 +106,14 @@ async function buffFetchTop({ limit, cookie }) {
   throw lastErr || new Error("BUFF failed after retries");
 }
 
-// In-memory WM token cache (Netlify keeps warm instances sometimes)
+// small cache (netlify warm instance)
 let WM_TOKEN_CACHE = { token: null, ts: 0 };
 
 async function wmAuthToken(endpoint, partnerToken) {
-  // cache ~10 minutes to reduce calls
   const now = Date.now();
   if (WM_TOKEN_CACHE.token && now - WM_TOKEN_CACHE.ts < 10 * 60 * 1000) {
     return WM_TOKEN_CACHE.token;
   }
-
-  const body = JSON.stringify({
-    query: `mutation { auth_token { accessToken } }`,
-    variables: {},
-  });
 
   const res = await fetchWithTimeout(
     endpoint,
@@ -140,7 +123,10 @@ async function wmAuthToken(endpoint, partnerToken) {
         "content-type": "application/json",
         "x-partner-token": partnerToken,
       },
-      body,
+      body: JSON.stringify({
+        query: `mutation { auth_token { accessToken } }`,
+        variables: {},
+      }),
     },
     15000
   );
@@ -156,7 +142,7 @@ async function wmAuthToken(endpoint, partnerToken) {
   }
 
   const token = jsonData?.data?.auth_token?.accessToken;
-  if (!token) throw new Error(`WM AUTH missing accessToken: ${text.slice(0, 300)}`);
+  if (!token) throw new Error(`WM AUTH missing token: ${text.slice(0, 300)}`);
 
   WM_TOKEN_CACHE = { token, ts: now };
   return token;
@@ -169,7 +155,7 @@ async function wmGraphql(endpoint, accessToken, query, variables) {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "authorization": `Bearer ${accessToken}`,
+        authorization: `Bearer ${accessToken}`,
       },
       body: JSON.stringify({ query, variables }),
     },
@@ -194,9 +180,7 @@ async function wmGraphql(endpoint, accessToken, query, variables) {
 }
 
 async function wmBestBuyOfferUSD({ endpoint, accessToken, nameHash }) {
-  // IMPORTANT:
-  // We use order_list(distinctValues: true) and read product.offerMinPrice.value
-  // which corresponds to best "Buy offer" you see on the item page.
+  // ✅ Correct: Buy offers are offerMinPrice, not listing price
   const query = `
     query($search: MarketOrderSearchInput!, $pagination: ForwardPaginationInput!) {
       order_list(search: $search, pagination: $pagination) {
@@ -231,33 +215,31 @@ async function wmBestBuyOfferUSD({ endpoint, accessToken, nameHash }) {
   const edge = data?.order_list?.edges?.[0];
   const product = edge?.node?.inventory?.product;
 
-  const offerValue = Number(product?.offerMinPrice?.value ?? 0) || 0;
+  const offer = Number(product?.offerMinPrice?.value ?? 0) || 0;
   const slug = product?.slug || "";
 
   return {
-    wmPrice: offerValue, // USD buy offer
+    wmPrice: offer, // USD buy offer
     wmUrl: slug ? `https://white.market/item/${slug}` : "https://white.market/",
   };
 }
 
 export async function handler(event) {
   try {
-    const limit = Math.min(
-      Math.max(Number(new URL(event.url).searchParams.get("limit") || DEFAULT_LIMIT), 1),
-      100
-    );
+    const limitRaw = event?.queryStringParameters?.limit;
+    const limit = Math.min(Math.max(Number(limitRaw || DEFAULT_LIMIT), 1), 50);
 
     const BUFF_COOKIE = process.env.BUFF_COOKIE;
     const WM_PARTNER_TOKEN = process.env.WM_PARTNER_TOKEN;
     const fx = Number(process.env.FX_CNYUSD || "0.14") || 0.14;
 
-    if (!BUFF_COOKIE) return json({ ok: false, error: "Missing env BUFF_COOKIE" }, 500);
-    if (!WM_PARTNER_TOKEN) return json({ ok: false, error: "Missing env WM_PARTNER_TOKEN" }, 500);
+    if (!BUFF_COOKIE) return reply(500, { ok: false, error: "Missing env BUFF_COOKIE" });
+    if (!WM_PARTNER_TOKEN) return reply(500, { ok: false, error: "Missing env WM_PARTNER_TOKEN" });
 
-    // 1) Fetch BUFF items (CNY)
+    // 1) Buff
     const buffItems = await buffFetchTop({ limit, cookie: BUFF_COOKIE });
 
-    // 2) WM: find a working endpoint + auth token
+    // 2) WM endpoint + auth
     let wmEndpoint = null;
     let accessToken = null;
     let lastWmErr = null;
@@ -276,8 +258,7 @@ export async function handler(event) {
       throw new Error(`WM failed: ${lastWmErr?.message || "Unknown WM error"}`);
     }
 
-    // 3) For each BUFF item, fetch WM best buy offer (USD)
-    // (This is N queries; keep limit small to stay fast)
+    // 3) Merge
     const items = [];
     for (const it of buffItems) {
       let wm = { wmPrice: 0, wmUrl: "https://white.market/" };
@@ -288,7 +269,7 @@ export async function handler(event) {
           nameHash: it.name,
         });
       } catch {
-        // keep wmPrice 0 if not found
+        // keep 0 if not found
       }
 
       items.push({
@@ -303,8 +284,8 @@ export async function handler(event) {
       });
     }
 
-    return json({ ok: true, fx, items });
+    return reply(200, { ok: true, fx, items });
   } catch (e) {
-    return json({ ok: false, error: String(e?.message || e) }, 500);
+    return reply(500, { ok: false, error: String(e?.message || e) });
   }
 }
