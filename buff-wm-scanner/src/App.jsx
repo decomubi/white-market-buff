@@ -1,18 +1,18 @@
-import React, { useState, useEffect, useMemo } from "react";
-import { Search, ArrowUpDown, TrendingUp, Box, RefreshCw, Filter, ExternalLink } from "lucide-react";
+import React, { useState, useEffect, useMemo } from 'react';
+import { Search, ArrowUpDown, TrendingUp, Box, RefreshCw, Filter, ExternalLink } from 'lucide-react';
 
-// fallback while backend is empty
+// Keep mock as fallback (if backend fails)
 const MOCK_DATA = [
-  { id: 1, name: "AK-47 | Redline", wear: "Field-Tested", image: "https://community.cloudflare.steamstatic.com/economy/image/-9a81dlWLwJ2UUGcVs_nsVtzdOEdtWwKGZZLQHTxDZ7I56KU0Zwwo4NUX4oFJZEHLbXH5ApeO4YmlhxYQknCRvCo04DEVlxkKgpot7HxfDhjxszJemkV09-5lpKKqPrxN7LEmyVQ7MEpiLuSrYmnjQO3-UdsZGrwIdKQegA4N1iF_gDQyL3n1sS56M_LznygnXP-n1DwJzs", buffPrice: 14.5, wmPrice: 18.2, quantity: 124, fx: 0.14 },
-  { id: 2, name: "AWP | Asiimov", wear: "Battle-Scarred", image: "https://community.cloudflare.steamstatic.com/economy/image/-9a81dlWLwJ2UUGcVs_nsVtzdOEdtWwKGZZLQHTxDZ7I56KU0Zwwo4NUX4oFJZEHLbXH5ApeO4YmlhxYQknCRvCo04DEVlxkKgpot621FAR17PLfYQJD_9W7m5a0mvLwOq7c2DlQsZ0kJ-vF846i2gK3-RZsY270LdTHI1Q5YlzR-FfsxLzmh569vMvAyHZnuiRz4XmJl0es1x1McKUx0v-N3b0d", buffPrice: 98, wmPrice: 105.5, quantity: 12, fx: 0.14 }
+  { id: 1, name: "AK-47 | Redline", wear: "Field-Tested", image: "https://community.cloudflare.steamstatic.com/economy/image/-9a81dlWLwJ2UUGcVs_nsVtzdOEdtWwKGZZLQHTxDZ7I56KU0Zwwo4NUX4oFJZEHLbXH5ApeO4YmlhxYQknCRvCo04DEVlxkKgpot7HxfDhjxszJemkV09-5lpKKqPrxN7LEmyVQ7MEpiLuSrYmnjQO3-UdsZGrwIdKQegA4N1iF_gDQyL3n1sS56M_LznygnXP-n1DwJzs", buffPrice: 14.50, wmPrice: 18.20, quantity: 124, fx: 0.14 },
 ];
 
 const App = () => {
-  const [searchTerm, setSearchTerm] = useState("");
-  const [sortConfig, setSortConfig] = useState({ key: "spread", direction: "desc" });
+  const [searchTerm, setSearchTerm] = useState('');
+  const [sortConfig, setSortConfig] = useState({ key: 'spread', direction: 'desc' });
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState(MOCK_DATA);
 
+  // Fetch from Netlify Function
   const fetchData = async () => {
     setLoading(true);
     try {
@@ -20,8 +20,8 @@ const App = () => {
       const data = await res.json();
       if (data?.ok) setItems(data.items || []);
     } catch (e) {
-      // keep current items
       console.error(e);
+      // keep current items
     } finally {
       setLoading(false);
     }
@@ -29,15 +29,15 @@ const App = () => {
 
   useEffect(() => {
     fetchData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Metrics (IMPORTANT): BUFF is CNY, WM is USD.
-  // We compute profit/spread using BUFF converted to USD via item.fx (defaults 0.14).
+  // --- Helpers ---
+  // BUFF is CNY, WM is USD
+  // Convert BUFF to USD using fx (env FX_CNYUSD returned as item.fx)
   const calculateMetrics = (item) => {
     const fx = Number(item.fx ?? 0.14);
-    const buffUsd = Number(item.buffUsd ?? (Number(item.buffPrice) * fx));
-    const wmUsd = Number(item.wmPrice);
+    const buffUsd = Number(item.buffPrice || 0) * fx;
+    const wmUsd = Number(item.wmPrice || 0);
 
     const profit = wmUsd - buffUsd;
     const spread = buffUsd > 0 ? ((wmUsd - buffUsd) / buffUsd) * 100 : 0;
@@ -48,19 +48,20 @@ const App = () => {
   const processedData = useMemo(() => {
     let data = items.map(calculateMetrics);
 
+    // Filtering
     if (searchTerm) {
       const lowerTerm = searchTerm.toLowerCase();
-      data = data.filter(
-        (item) =>
-          String(item.name).toLowerCase().includes(lowerTerm) ||
-          String(item.wear).toLowerCase().includes(lowerTerm)
+      data = data.filter(item =>
+        String(item.name).toLowerCase().includes(lowerTerm) ||
+        String(item.wear).toLowerCase().includes(lowerTerm)
       );
     }
 
+    // Sorting
     if (sortConfig.key) {
       data.sort((a, b) => {
-        if (a[sortConfig.key] < b[sortConfig.key]) return sortConfig.direction === "asc" ? -1 : 1;
-        if (a[sortConfig.key] > b[sortConfig.key]) return sortConfig.direction === "asc" ? 1 : -1;
+        if (a[sortConfig.key] < b[sortConfig.key]) return sortConfig.direction === 'asc' ? -1 : 1;
+        if (a[sortConfig.key] > b[sortConfig.key]) return sortConfig.direction === 'asc' ? 1 : -1;
         return 0;
       });
     }
@@ -69,8 +70,8 @@ const App = () => {
   }, [items, searchTerm, sortConfig]);
 
   const handleSort = (key) => {
-    let direction = "desc";
-    if (sortConfig.key === key && sortConfig.direction === "desc") direction = "asc";
+    let direction = 'desc';
+    if (sortConfig.key === key && sortConfig.direction === 'desc') direction = 'asc';
     setSortConfig({ key, direction });
   };
 
@@ -80,6 +81,7 @@ const App = () => {
 
   return (
     <div className="min-h-screen bg-[#121212] text-gray-200 font-sans selection:bg-indigo-500 selection:text-white">
+
       {/* Navbar */}
       <nav className="border-b border-gray-800 bg-[#1a1b1e] sticky top-0 z-10 shadow-lg">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -89,9 +91,7 @@ const App = () => {
                 <TrendingUp size={20} className="text-white" />
               </div>
               <div>
-                <h1 className="text-xl font-bold text-white tracking-tight">
-                  Arbitrage<span className="text-indigo-400">Scanner</span>
-                </h1>
+                <h1 className="text-xl font-bold text-white tracking-tight">Arbitrage<span className="text-indigo-400">Scanner</span></h1>
                 <p className="text-xs text-gray-500">Buff163 to WhiteMarket</p>
               </div>
             </div>
@@ -99,52 +99,31 @@ const App = () => {
             <div className="hidden md:flex items-center gap-6 text-sm text-gray-400">
               <div className="flex items-center gap-2">
                 <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                Buff163: Server-side
+                Buff163 API: Server-side
               </div>
               <div className="flex items-center gap-2">
                 <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                WhiteMarket: Server-side
+                WhiteMarket API: Server-side
               </div>
             </div>
           </div>
         </div>
       </nav>
 
-      {/* Main */}
+      {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Stats */}
+
+        {/* Stats Row */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-          <StatCard
-            label="Profitable Flips"
-            value={processedData.filter((i) => i.profit > 0).length}
-            icon={<TrendingUp size={18} />}
-            variant="green"
-          />
-          <StatCard
-            label="Avg. Spread"
-            value={`${(
-              processedData.reduce((acc, curr) => acc + curr.spread, 0) / (processedData.length || 1)
-            ).toFixed(2)}%`}
-            icon={<Box size={18} />}
-            variant="blue"
-          />
-          <StatCard
-            label="Total Volume"
-            value={processedData.reduce((acc, curr) => acc + (Number(curr.quantity) || 0), 0)}
-            icon={<Filter size={18} />}
-            variant="purple"
-          />
-          <div
-            className="bg-[#1a1b1e] p-4 rounded-xl border border-gray-800 flex items-center justify-between hover:border-gray-700 transition-colors cursor-pointer group"
-            onClick={refreshData}
-          >
+          <StatCard label="Profitable Flips" value={processedData.filter(i => i.profit > 0).length} icon={<TrendingUp size={18} />} color="text-green-400" />
+          <StatCard label="Avg. Spread" value={`${(processedData.reduce((acc, curr) => acc + curr.spread, 0) / processedData.length || 0).toFixed(2)}%`} icon={<Box size={18} />} color="text-blue-400" />
+          <StatCard label="Total Volume" value={processedData.reduce((acc, curr) => acc + (Number(curr.quantity) || 0), 0)} icon={<Filter size={18} />} color="text-purple-400" />
+          <div className="bg-[#1a1b1e] p-4 rounded-xl border border-gray-800 flex items-center justify-between hover:border-gray-700 transition-colors cursor-pointer group" onClick={refreshData}>
             <div>
               <p className="text-gray-500 text-xs font-medium uppercase tracking-wider">Data Status</p>
-              <p className="text-xl font-bold text-white mt-1 group-hover:text-indigo-400 transition-colors">
-                {loading ? "Updating..." : "Up to Date"}
-              </p>
+              <p className="text-xl font-bold text-white mt-1 group-hover:text-indigo-400 transition-colors">{loading ? "Updating..." : "Up to Date"}</p>
             </div>
-            <RefreshCw size={24} className={`text-gray-500 group-hover:text-indigo-400 transition-all ${loading ? "animate-spin" : ""}`} />
+            <RefreshCw size={24} className={`text-gray-500 group-hover:text-indigo-400 transition-all ${loading ? 'animate-spin' : ''}`} />
           </div>
         </div>
 
@@ -168,22 +147,21 @@ const App = () => {
           </button>
         </div>
 
-        {/* Table */}
+        {/* Data Table */}
         <div className="bg-[#1a1b1e] rounded-xl border border-gray-800 shadow-xl overflow-hidden">
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-800">
               <thead className="bg-[#151619]">
                 <tr>
-                  <Th label="Item Details" align="left" onClick={() => handleSort("name")} />
-                  <Th label="Buff163 Price" align="right" onClick={() => handleSort("buffPrice")} />
-                  <Th label="WM Buy Order" align="right" onClick={() => handleSort("wmPrice")} />
-                  <Th label="Spread" align="right" onClick={() => handleSort("spread")} />
-                  <Th label="Net Profit" align="right" onClick={() => handleSort("profit")} />
-                  <Th label="Quantity" align="center" onClick={() => handleSort("quantity")} />
+                  <Th label="Item Details" sortKey="name" onClick={() => handleSort('name')} sortConfig={sortConfig} align="left" />
+                  <Th label="Buff163 Price" sortKey="buffPrice" onClick={() => handleSort('buffPrice')} sortConfig={sortConfig} align="right" />
+                  <Th label="WM Buy Order" sortKey="wmPrice" onClick={() => handleSort('wmPrice')} sortConfig={sortConfig} align="right" />
+                  <Th label="Spread" sortKey="spread" onClick={() => handleSort('spread')} sortConfig={sortConfig} align="right" />
+                  <Th label="Net Profit" sortKey="profit" onClick={() => handleSort('profit')} sortConfig={sortConfig} align="right" />
+                  <Th label="Quantity" sortKey="quantity" onClick={() => handleSort('quantity')} sortConfig={sortConfig} align="center" />
                   <th className="px-6 py-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                 </tr>
               </thead>
-
               <tbody className="divide-y divide-gray-800">
                 {processedData.length > 0 ? (
                   processedData.map((item) => (
@@ -195,7 +173,9 @@ const App = () => {
                           </div>
                           <div className="ml-4">
                             <div className="text-sm font-medium text-white">{item.name}</div>
-                            <div className="text-xs text-gray-500 flex items-center gap-2">{item.wear}</div>
+                            <div className="text-xs text-gray-500 flex items-center gap-2">
+                              {item.wear}
+                            </div>
                           </div>
                         </div>
                       </td>
@@ -217,20 +197,13 @@ const App = () => {
                       </td>
 
                       <td className="px-6 py-4 whitespace-nowrap text-right">
-                        <span
-                          className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-md ${
-                            item.spread > 0
-                              ? "bg-green-900/30 text-green-400 border border-green-900"
-                              : "bg-red-900/30 text-red-400 border border-red-900"
-                          }`}
-                        >
-                          {item.spread > 0 ? "+" : ""}
-                          {Number(item.spread || 0).toFixed(2)}%
+                        <span className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-md ${item.spread > 0 ? 'bg-green-900/30 text-green-400 border border-green-900' : 'bg-red-900/30 text-red-400 border border-red-900'}`}>
+                          {item.spread > 0 ? '+' : ''}{Number(item.spread || 0).toFixed(2)}%
                         </span>
                       </td>
 
                       <td className="px-6 py-4 whitespace-nowrap text-right">
-                        <div className={`text-sm font-mono font-bold ${item.profit > 0 ? "text-green-400" : "text-red-400"}`}>
+                        <div className={`text-sm font-mono font-bold ${item.profit > 0 ? 'text-green-400' : 'text-red-400'}`}>
                           ${Number(item.profit || 0).toFixed(2)}
                         </div>
                       </td>
@@ -244,11 +217,10 @@ const App = () => {
 
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                         <a
-                          href={item.wmUrl || "#"}
+                          href={item.wmUrl || "https://white.market/"}
                           target="_blank"
                           rel="noreferrer"
-                          className="inline-flex text-indigo-400 hover:text-indigo-300 bg-indigo-900/20 p-2 rounded-lg hover:bg-indigo-900/40 transition-colors"
-                          title="Open on White.Market"
+                          className="text-indigo-400 hover:text-indigo-300 bg-indigo-900/20 p-2 rounded-lg hover:bg-indigo-900/40 transition-colors inline-flex"
                         >
                           <ExternalLink size={16} />
                         </a>
@@ -270,14 +242,11 @@ const App = () => {
             </table>
           </div>
 
-          {/* Footer */}
           <div className="bg-[#151619] px-4 py-3 border-t border-gray-800 flex items-center justify-between sm:px-6">
             <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
               <div>
                 <p className="text-sm text-gray-500">
-                  Showing <span className="font-medium text-gray-300">1</span> to{" "}
-                  <span className="font-medium text-gray-300">{processedData.length}</span> of{" "}
-                  <span className="font-medium text-gray-300">{items.length}</span> results
+                  Showing <span className="font-medium text-gray-300">1</span> to <span className="font-medium text-gray-300">{processedData.length}</span> of <span className="font-medium text-gray-300">{items.length}</span> results
                 </p>
               </div>
               <div>
@@ -301,46 +270,39 @@ const App = () => {
               </div>
             </div>
           </div>
+
         </div>
       </main>
     </div>
   );
 };
 
-// --- Components ---
-const StatCard = ({ label, value, icon, variant = "green" }) => {
-  const variants = {
-    green: { text: "text-green-400", bg: "bg-green-900/20" },
-    blue: { text: "text-blue-400", bg: "bg-blue-900/20" },
-    purple: { text: "text-purple-400", bg: "bg-purple-900/20" }
-  };
-  const v = variants[variant] || variants.green;
-
-  return (
-    <div className="bg-[#1a1b1e] p-4 rounded-xl border border-gray-800 flex items-center justify-between hover:border-gray-700 transition-colors">
-      <div>
-        <p className="text-gray-500 text-xs font-medium uppercase tracking-wider">{label}</p>
-        <p className={`text-2xl font-bold mt-1 ${v.text}`}>{value}</p>
-      </div>
-      <div className={`p-3 rounded-lg ${v.bg} ${v.text}`}>{icon}</div>
+// Sub-components
+const StatCard = ({ label, value, icon, color }) => (
+  <div className="bg-[#1a1b1e] p-4 rounded-xl border border-gray-800 flex items-center justify-between hover:border-gray-700 transition-colors">
+    <div>
+      <p className="text-gray-500 text-xs font-medium uppercase tracking-wider">{label}</p>
+      <p className={`text-2xl font-bold mt-1 ${color ? color : 'text-white'}`}>{value}</p>
     </div>
-  );
-};
+    <div className={`p-3 rounded-lg bg-opacity-10 ${color ? color.replace('text-', 'bg-') : 'bg-gray-700'} ${color}`}>
+      {icon}
+    </div>
+  </div>
+);
 
-const Th = ({ label, onClick, align = "left" }) => {
-  const alignClass = align === "right" ? "text-right" : align === "center" ? "text-center" : "text-left";
-  const justifyClass = align === "right" ? "justify-end" : align === "center" ? "justify-center" : "justify-start";
+const Th = ({ label, sortKey, onClick, sortConfig, align = 'left' }) => {
+  const isActive = sortConfig.key === sortKey;
 
   return (
     <th
       scope="col"
-      className={`px-6 py-4 ${alignClass} text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-indigo-400 transition-colors select-none group`}
+      className={`px-6 py-4 text-${align} text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-indigo-400 transition-colors select-none group`}
       onClick={onClick}
     >
-      <div className={`flex items-center gap-2 ${justifyClass}`}>
+      <div className={`flex items-center gap-2 ${align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'}`}>
         {label}
-        <span className="opacity-50">
-          <ArrowUpDown size={14} />
+        <span className={`transform transition-opacity ${isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-50'}`}>
+          <ArrowUpDown size={14} className={isActive && sortConfig.direction === 'asc' ? 'transform rotate-180' : ''} />
         </span>
       </div>
     </th>
@@ -348,4 +310,3 @@ const Th = ({ label, onClick, align = "left" }) => {
 };
 
 export default App;
-
