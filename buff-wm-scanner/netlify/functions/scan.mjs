@@ -1,291 +1,317 @@
 // netlify/functions/scan.mjs
-// Netlify Function (NOT Edge). Must return { statusCode, headers, body }.
-// BUFF163 (CNY) -> White.Market (USD Buy Offer)
+// Buff163 -> WhiteMarket scanner (Netlify Function, ESM)
+//
+// Env needed on Netlify:
+// - BUFF_COOKIE   (your buff cookie string, incl Device-Id etc)
+// - WM_PARTNER_TOKEN
+// - FX_CNYUSD     (example: 0.14)
+//
+// Optional env:
+// - WM_GRAPHQL_URL (default: https://api.white.market/graphql)
+// - BUFF_PAGE_SIZE (default: 50)
 
-const BUFF_URL = "https://buff.163.com/api/market/goods";
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Partner-Token, x-partner-token",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+};
 
-const WM_ENDPOINTS = [
-  "https://api.white.market/graphql/partner",
-  "https://api.white.market/graphql/partner/",
-];
+const json = (statusCode, bodyObj) => ({
+  statusCode,
+  headers: { "Content-Type": "application/json; charset=utf-8", ...CORS },
+  body: JSON.stringify(bodyObj),
+});
 
-const DEFAULT_LIMIT = 30;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function reply(statusCode, data) {
-  return {
-    statusCode,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store",
-    },
-    body: JSON.stringify(data),
-  };
-}
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
+function withTimeout(ms) {
   const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => controller.abort(), ms);
+  return { controller, timer };
+}
+
+async function safeFetch(url, options = {}, timeoutMs = 15000) {
+  const { controller, timer } = withTimeout(timeoutMs);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    return res;
   } finally {
-    clearTimeout(id);
+    clearTimeout(timer);
   }
 }
 
-async function buffFetchTop({ limit, cookie }) {
-  const url = new URL(BUFF_URL);
-  url.searchParams.set("game", "csgo");
-  url.searchParams.set("page_num", "1");
-  url.searchParams.set("page_size", String(Math.min(Math.max(limit, 1), 100)));
+function parseWearFromNameHash(nameHash = "") {
+  // "Tec-9 | Cracked Opal (Field-Tested)" => wear "Field-Tested"
+  const m = nameHash.match(/\(([^)]+)\)\s*$/);
+  return m ? m[1] : "-";
+}
 
-  const headers = {
-    "user-agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-    accept: "application/json, text/plain, */*",
-    referer: "https://buff.163.com/market/csgo",
-    cookie,
-  };
+function parseDisplayName(nameHash = "") {
+  // Keep as-is; frontend shows "Sticker | Bolt Charge" etc.
+  return nameHash || "-";
+}
 
-  let lastErr = null;
+function parseIconUrlFromBuff(goodsInfo) {
+  // Buff returns several icon fields depending on endpoint
+  return (
+    goodsInfo?.goods_info?.icon_url ||
+    goodsInfo?.goods_info?.icon_url_large ||
+    goodsInfo?.goods_info?.original_icon_url ||
+    goodsInfo?.goods_info?.image_url ||
+    ""
+  );
+}
 
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await fetchWithTimeout(url.toString(), { headers }, 15000);
-    const text = await res.text();
+/**
+ * -------- BUFF163 --------
+ * We use the public market goods list API (requires your cookie).
+ * Endpoint used widely:
+ * https://buff.163.com/api/market/goods?game=csgo&page_num=1&page_size=...
+ */
+async function buffFetchGoods({ limit = 30, pageNum = 1 }) {
+  const cookie = process.env.BUFF_COOKIE;
+  if (!cookie) throw new Error("Missing BUFF_COOKIE env var");
 
-    if (res.status === 429) {
-      lastErr = new Error(`BUFF HTTP 429: ${text}`);
-      await sleep(700 * (attempt + 1));
-      continue;
-    }
+  const pageSize = Number(process.env.BUFF_PAGE_SIZE || 50);
+  const take = Math.max(1, Math.min(limit, pageSize));
 
-    if (!res.ok) throw new Error(`BUFF HTTP ${res.status}: ${text}`);
+  const url =
+    `https://buff.163.com/api/market/goods?game=csgo` +
+    `&page_num=${encodeURIComponent(pageNum)}` +
+    `&page_size=${encodeURIComponent(take)}` +
+    `&sort_by=price.desc`;
 
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      throw new Error(`BUFF bad JSON: ${text.slice(0, 200)}`);
-    }
+  const res = await safeFetch(
+    url,
+    {
+      method: "GET",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        Accept: "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        Referer: "https://buff.163.com/market/csgo",
+        Cookie: cookie,
+      },
+    },
+    20000
+  );
 
-    if (!data || data.code !== "OK" || !data.data) {
-      throw new Error(`BUFF unexpected response: ${text.slice(0, 300)}`);
-    }
+  if (res.status === 429) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`BUFF HTTP 429: ${t}`);
+  }
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`BUFF HTTP ${res.status}: ${t}`);
+  }
 
-    const items = Array.isArray(data.data.items) ? data.data.items : [];
+  const data = await res.json();
+  const items = data?.data?.items || [];
 
-    return items.map((it) => {
-      const goodsId = it.id ?? it.goods_id ?? it.goodsId ?? it.name;
-      const name = it.name ?? it.goods_info?.name ?? it.market_hash_name ?? "";
-      const icon =
-        it.goods_info?.icon_url ??
-        it.goods_info?.original_icon_url ??
-        it.icon_url ??
-        it.icon ??
-        "";
-
-      const buffPrice =
-        Number(it.sell_min_price ?? it.min_price ?? it.sell_min_price_cny ?? 0) || 0;
-
-      const quantity = Number(it.sell_num ?? it.sell_count ?? 0) || 0;
+  // Normalize to what we need
+  return items
+    .map((x) => {
+      const gi = x?.goods_info || {};
+      const nameHash = gi?.market_hash_name || gi?.name || "";
+      const buffPriceCny = Number(x?.sell_min_price ?? x?.min_price ?? 0);
+      const quantity = Number(x?.sell_num ?? x?.sell_num ?? 0);
 
       return {
-        id: goodsId,
-        name,
-        wear: "-",
-        image: icon.startsWith("http") ? icon : icon ? `https:${icon}` : "",
-        buffPrice, // CNY
+        buffGoodsId: gi?.id ?? x?.id ?? null,
+        nameHash,
+        name: parseDisplayName(nameHash),
+        wear: parseWearFromNameHash(nameHash),
+        image: parseIconUrlFromBuff(x),
+        buffPriceCny,
         quantity,
       };
-    });
-  }
-
-  throw lastErr || new Error("BUFF failed after retries");
+    })
+    .filter((x) => x.nameHash && x.buffPriceCny > 0);
 }
 
-// small cache (netlify warm instance)
-let WM_TOKEN_CACHE = { token: null, ts: 0 };
+/**
+ * -------- WHITE.MARKET --------
+ * We query buy offers (bids).
+ * If WM API fails, we return 0 (but we also surface the error so you can see it).
+ *
+ * Default GraphQL endpoint (NO trailing slash):
+ * https://api.white.market/graphql  :contentReference[oaicite:1]{index=1}
+ */
+async function wmGraphql(query, variables) {
+  const token = process.env.WM_PARTNER_TOKEN;
+  if (!token) throw new Error("Missing WM_PARTNER_TOKEN env var");
 
-async function wmAuthToken(endpoint, partnerToken) {
-  const now = Date.now();
-  if (WM_TOKEN_CACHE.token && now - WM_TOKEN_CACHE.ts < 10 * 60 * 1000) {
-    return WM_TOKEN_CACHE.token;
-  }
+  const url = (process.env.WM_GRAPHQL_URL || "https://api.white.market/graphql").replace(/\/+$/, "");
 
-  const res = await fetchWithTimeout(
-    endpoint,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-partner-token": partnerToken,
-      },
-      body: JSON.stringify({
-        query: `mutation { auth_token { accessToken } }`,
-        variables: {},
-      }),
-    },
-    15000
+  // Try multiple header styles to match partner setups
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    Authorization: `Bearer ${token}`,
+    "X-Partner-Token": token,
+    "x-partner-token": token,
+  };
+
+  const res = await safeFetch(
+    url,
+    { method: "POST", headers, body: JSON.stringify({ query, variables }) },
+    20000
   );
 
-  const text = await res.text();
-  if (!res.ok) throw new Error(`WM AUTH HTTP ${res.status}: ${text}`);
+  const text = await res.text().catch(() => "");
+  if (!res.ok) {
+    throw new Error(`WM HTTP ${res.status} at ${url}: ${text}`);
+  }
 
   let jsonData;
   try {
     jsonData = JSON.parse(text);
   } catch {
-    throw new Error(`WM AUTH bad JSON: ${text.slice(0, 200)}`);
-  }
-
-  const token = jsonData?.data?.auth_token?.accessToken;
-  if (!token) throw new Error(`WM AUTH missing token: ${text.slice(0, 300)}`);
-
-  WM_TOKEN_CACHE = { token, ts: now };
-  return token;
-}
-
-async function wmGraphql(endpoint, accessToken, query, variables) {
-  const res = await fetchWithTimeout(
-    endpoint,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify({ query, variables }),
-    },
-    15000
-  );
-
-  const text = await res.text();
-  if (!res.ok) throw new Error(`WM HTTP ${res.status} at ${endpoint}: ${text}`);
-
-  let jsonData;
-  try {
-    jsonData = JSON.parse(text);
-  } catch {
-    throw new Error(`WM bad JSON: ${text.slice(0, 200)}`);
+    throw new Error(`WM invalid JSON: ${text.slice(0, 200)}`);
   }
 
   if (jsonData.errors?.length) {
-    throw new Error(`WM GraphQL error: ${JSON.stringify(jsonData.errors).slice(0, 400)}`);
+    throw new Error(`WM GraphQL errors: ${JSON.stringify(jsonData.errors)}`);
   }
 
   return jsonData.data;
 }
 
-async function wmBestBuyOfferUSD({ endpoint, accessToken, nameHash }) {
-  // ✅ Correct: Buy offers are offerMinPrice, not listing price
-  const query = `
-    query($search: MarketOrderSearchInput!, $pagination: ForwardPaginationInput!) {
-      order_list(search: $search, pagination: $pagination) {
+/**
+ * IMPORTANT:
+ * WhiteMarket schema can differ depending on partner access.
+ * So we:
+ * 1) Find product by nameHash
+ * 2) Pull BUY offers list and take top price + total qty
+ *
+ * This query is written defensively (we try to read multiple possible fields).
+ */
+async function wmGetBestBuyOfferUsd(nameHash) {
+  // Step 1: find product by nameHash
+  const qProduct = `
+    query FindProduct($search: MarketProductSearchInput, $first: Int) {
+      marketProducts(search: $search, first: $first) {
         edges {
           node {
-            inventory {
-              product {
-                name
-                slug
-                offerMinPrice { value currency }
-              }
-            }
+            id
+            nameHash
+            slug
           }
         }
       }
     }
   `;
 
-  const variables = {
-    search: {
-      appId: "CSGO",
-      searchType: "MARKET",
-      nameHash,
-      nameHashStrict: true,
-      distinctValues: true,
-    },
-    pagination: { first: 1 },
-  };
+  // many schemas use MarketProductSearchInput { nameHash: "..." }
+  let productId = null;
+  let slug = null;
 
-  const data = await wmGraphql(endpoint, accessToken, query, variables);
+  const data1 = await wmGraphql(qProduct, { search: { nameHash }, first: 1 });
+  const node1 = data1?.marketProducts?.edges?.[0]?.node;
+  if (node1?.id) {
+    productId = node1.id;
+    slug = node1.slug || null;
+  }
 
-  const edge = data?.order_list?.edges?.[0];
-  const product = edge?.node?.inventory?.product;
+  if (!productId) {
+    return { bestUsd: 0, totalQty: 0, wmUrl: slug ? `https://white.market/item/${slug}` : `https://white.market/market?search=${encodeURIComponent(nameHash)}` };
+  }
 
-  const offer = Number(product?.offerMinPrice?.value ?? 0) || 0;
-  const slug = product?.slug || "";
+  // Step 2: buy offers (bids)
+  // Some schemas expose order books as "orders" or "orderList" with offerType BUY.
+  const qBuy = `
+    query BuyOffers($first: Int, $search: OrderSearchInput, $sort: OrderSortInput) {
+      orderList(first: $first, search: $search, sort: $sort) {
+        edges {
+          node {
+            id
+            offerType
+            price
+            quantity
+            amount
+            value
+          }
+        }
+      }
+    }
+  `;
 
-  return {
-    wmPrice: offer, // USD buy offer
-    wmUrl: slug ? `https://white.market/item/${slug}` : "https://white.market/",
-  };
+  // We try: offerType BUY + productId
+  const data2 = await wmGraphql(qBuy, {
+    first: 50,
+    search: { productId, offerType: "BUY" },
+    sort: { field: "PRICE", direction: "DESC" },
+  });
+
+  const edges = data2?.orderList?.edges || [];
+  const offers = edges
+    .map((e) => e?.node || null)
+    .filter(Boolean)
+    .map((n) => {
+      const price = Number(n.price ?? n.amount ?? n.value ?? 0);
+      const qty = Number(n.quantity ?? 0);
+      return { price, qty };
+    })
+    .filter((x) => x.price > 0 && x.qty > 0);
+
+  let bestUsd = 0;
+  let totalQty = 0;
+
+  for (const o of offers) {
+    if (o.price > bestUsd) bestUsd = o.price;
+    totalQty += o.qty;
+  }
+
+  const wmUrl = slug ? `https://white.market/item/${slug}` : `https://white.market/market?search=${encodeURIComponent(nameHash)}`;
+  return { bestUsd, totalQty, wmUrl };
 }
 
 export async function handler(event) {
   try {
-    const limitRaw = event?.queryStringParameters?.limit;
-    const limit = Math.min(Math.max(Number(limitRaw || DEFAULT_LIMIT), 1), 50);
+    if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers: CORS, body: "" };
 
-    const BUFF_COOKIE = process.env.BUFF_COOKIE;
-    const WM_PARTNER_TOKEN = process.env.WM_PARTNER_TOKEN;
-    const fx = Number(process.env.FX_CNYUSD || "0.14") || 0.14;
+    const limit = Math.max(1, Math.min(Number(event.queryStringParameters?.limit || 30), 200));
+    const fx = Number(process.env.FX_CNYUSD || 0.14);
 
-    if (!BUFF_COOKIE) return reply(500, { ok: false, error: "Missing env BUFF_COOKIE" });
-    if (!WM_PARTNER_TOKEN) return reply(500, { ok: false, error: "Missing env WM_PARTNER_TOKEN" });
+    // 1) BUFF goods (CNY)
+    const buffGoods = await buffFetchGoods({ limit });
 
-    // 1) Buff
-    const buffItems = await buffFetchTop({ limit, cookie: BUFF_COOKIE });
-
-    // 2) WM endpoint + auth
-    let wmEndpoint = null;
-    let accessToken = null;
-    let lastWmErr = null;
-
-    for (const ep of WM_ENDPOINTS) {
-      try {
-        accessToken = await wmAuthToken(ep, WM_PARTNER_TOKEN);
-        wmEndpoint = ep;
-        break;
-      } catch (e) {
-        lastWmErr = e;
-      }
-    }
-
-    if (!wmEndpoint || !accessToken) {
-      throw new Error(`WM failed: ${lastWmErr?.message || "Unknown WM error"}`);
-    }
-
-    // 3) Merge
+    // 2) For each, fetch WM buy offers (USD)
     const items = [];
-    for (const it of buffItems) {
-      let wm = { wmPrice: 0, wmUrl: "https://white.market/" };
+    for (const g of buffGoods) {
+      let wm = { bestUsd: 0, totalQty: 0, wmUrl: `https://white.market/market?search=${encodeURIComponent(g.nameHash)}` };
+      let wmErr = null;
+
       try {
-        wm = await wmBestBuyOfferUSD({
-          endpoint: wmEndpoint,
-          accessToken,
-          nameHash: it.name,
-        });
-      } catch {
-        // keep 0 if not found
+        wm = await wmGetBestBuyOfferUsd(g.nameHash);
+      } catch (e) {
+        wmErr = String(e?.message || e);
       }
+
+      // Convert BUFF CNY => USD (simple FX; you can refine later)
+      const buffUsd = g.buffPriceCny * fx;
 
       items.push({
-        id: it.id,
-        name: it.name,
-        wear: it.wear ?? "-",
-        image: it.image,
-        buffPrice: Number(it.buffPrice || 0), // CNY
-        wmPrice: Number(wm.wmPrice || 0), // USD buy offer
-        quantity: Number(it.quantity || 0),
+        id: g.buffGoodsId || g.nameHash,
+        name: g.name,
+        wear: g.wear,
+        image: g.image,
+        buffPrice: Number(g.buffPriceCny.toFixed(2)), // CNY in UI (¥)
+        wmPrice: Number((wm.bestUsd || 0).toFixed(2)), // USD in UI ($) - best BUY OFFER
+        quantity: g.quantity,
+        wmQty: wm.totalQty,
         wmUrl: wm.wmUrl,
+        fx,
+        wmError: wmErr, // shown only if you want to debug
       });
+
+      // avoid rate spikes
+      await sleep(120);
     }
 
-    return reply(200, { ok: true, fx, items });
-  } catch (e) {
-    return reply(500, { ok: false, error: String(e?.message || e) });
+    return json(200, { ok: true, fx, items });
+  } catch (err) {
+    return json(500, { ok: false, error: String(err?.message || err) });
   }
 }
