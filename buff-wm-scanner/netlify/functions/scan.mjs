@@ -1,131 +1,257 @@
-// buff-wm-scanner/netlify/functions/scan.mjs
-// BUFF163 (CS2) -> White.Market buy orders
-// IMPORTANT: This version avoids BUFF 429 by doing ONLY 1 BUFF request per scan
-// and using sell_min_price from the goods list.
+// netlify/functions/scan.mjs
+// Buff163 -> White.Market scanner (Netlify Function, ESM)
 
-const BUFF_BASE = "https://buff.163.com";
-const WM_GQL_ENDPOINT = "https://api.white.market/graphql/partner";
+const BUFF_COOKIE = process.env.BUFF_COOKIE || "";
+const WM_PARTNER_TOKEN = process.env.WM_PARTNER_TOKEN || "";
+const FX_CNYUSD = Number(process.env.FX_CNYUSD || "0.14"); // 1 CNY -> USD
+const WM_FEE = Number(process.env.WM_FEE || "0.00"); // optional fee, e.g. 0.05 for 5%
 
-// Cache White.Market access token (valid ~24h; we refresh early)
-let wmCache = { token: null, exp: 0 };
+const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
-// Cache BUFF goods list for 60 seconds to avoid rate limits
-let buffCache = { ts: 0, key: "", items: [] };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function ok(body) {
-  return {
-    statusCode: 200,
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
-    body: JSON.stringify(body),
-  };
+function withTimeout(ms) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  return { signal: ctrl.signal, cancel: () => clearTimeout(t) };
 }
 
-function fail(statusCode, message) {
-  return {
-    statusCode,
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
-    body: JSON.stringify({ ok: false, error: message }),
-  };
-}
-
-function mustEnv(name) {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing env var: ${name}`);
-  return v;
-}
-
-function normalizeUrl(u) {
-  if (!u) return "";
-  if (u.startsWith("//")) return "https:" + u;
-  return u;
-}
-
-// --- BUFF (ONE request only) ---
-async function buffFetch(path, params = {}) {
-  const cookie = mustEnv("BUFF_COOKIE"); // must be FULL cookie string, not only Device-Id
-
-  const url = new URL(BUFF_BASE + path);
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, String(v));
-  }
-
-  const r = await fetch(url.toString(), {
-    headers: {
-      cookie,
-      "user-agent": "Mozilla/5.0",
-      referer: "https://buff.163.com/market/csgo",
-      accept: "application/json, text/plain, */*",
-    },
-  });
-
-  const text = await r.text().catch(() => "");
-  let json;
+async function fetchJson(url, opts = {}, timeoutMs = 15000) {
+  const { signal, cancel } = withTimeout(timeoutMs);
   try {
-    json = text ? JSON.parse(text) : {};
-  } catch {
-    json = { raw: text };
+    const res = await fetch(url, { ...opts, signal });
+    const text = await res.text();
+    let json = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = null;
+    }
+    return { ok: res.ok, status: res.status, json, text };
+  } finally {
+    cancel();
   }
-
-  if (!r.ok) {
-    const msg = typeof json === "object" ? JSON.stringify(json) : String(text);
-    throw new Error(`BUFF HTTP ${r.status}: ${msg}`);
-  }
-  return json;
 }
 
-async function buffGoodsList({ search = "", pageNum = 1, pageSize = 20 } = {}) {
-  // Uses BUFF web endpoint for CS2/CSGO market goods list
-  const data = await buffFetch("/api/market/goods", {
-    game: "csgo",
-    page_num: pageNum,
-    page_size: pageSize,
-    search,
-  });
-  return data?.data?.items || [];
+// ---------- BUFF (best-effort parser; works with common Buff endpoints) ----------
+
+function normalizeBuffIcon(url) {
+  if (!url) return "";
+  if (url.startsWith("//")) return "https:" + url;
+  if (url.startsWith("http")) return url;
+  return "https://buff.163.com" + url;
 }
 
-// --- White.Market ---
-async function wmGetAccessToken() {
-  const partnerToken = mustEnv("WM_PARTNER_TOKEN");
-  const now = Date.now();
+function extractWear(name = "") {
+  // e.g. "AK-47 | Jaguar (Field-Tested)"
+  const m = name.match(/\(([^)]+)\)\s*$/);
+  return m ? m[1] : "";
+}
 
-  if (wmCache.token && wmCache.exp > now) return wmCache.token;
+function parseBuffItems(payload) {
+  // Buff responses vary; try common shapes:
+  const candidates =
+    payload?.data?.items ||
+    payload?.data?.goods ||
+    payload?.data?.data?.items ||
+    payload?.data?.data ||
+    [];
 
-  const r = await fetch(WM_GQL_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "X-partner-token": partnerToken,
+  const arr = Array.isArray(candidates) ? candidates : [];
+
+  return arr
+    .map((it) => {
+      const id = it.id ?? it.goods_id ?? it.goodsId ?? it?.goods?.id;
+      const name =
+        it.name ??
+        it.market_hash_name ??
+        it?.goods_info?.name ??
+        it?.goods?.name ??
+        "";
+      const buffPriceRaw =
+        it.sell_min_price ??
+        it?.sell_min_price?.value ??
+        it.price ??
+        it?.goods_info?.sell_min_price ??
+        it?.goods?.sell_min_price ??
+        null;
+
+      const buffPrice = buffPriceRaw != null ? Number(buffPriceRaw) : NaN;
+
+      const quantity =
+        it.sell_num ??
+        it?.sell_num?.value ??
+        it?.goods_info?.sell_num ??
+        it?.goods?.sell_num ??
+        it?.sellCount ??
+        0;
+
+      const icon =
+        it?.goods_info?.icon_url ||
+        it?.goods_info?.iconUrl ||
+        it?.icon_url ||
+        it?.iconUrl ||
+        it?.goods?.icon_url ||
+        "";
+
+      const image = normalizeBuffIcon(icon);
+      const wear = it.wear || extractWear(name);
+
+      if (!id || !name || !Number.isFinite(buffPrice)) return null;
+
+      return {
+        id,
+        name,
+        wear,
+        image,
+        buffPrice, // CNY
+        quantity: Number(quantity || 0),
+      };
+    })
+    .filter(Boolean);
+}
+
+async function fetchBuffTopList(limit) {
+  if (!BUFF_COOKIE) {
+    throw new Error("Missing BUFF_COOKIE env var");
+  }
+
+  // Common Buff listing endpoint:
+  // NOTE: If your current project uses a different Buff endpoint, replace ONLY this URL,
+  // keep the rest unchanged.
+  const url = new URL("https://buff.163.com/api/market/goods");
+  url.searchParams.set("game", "csgo");
+  url.searchParams.set("page_num", "1");
+  url.searchParams.set("page_size", String(limit));
+  // You can change sort_by if you want:
+  // url.searchParams.set("sort_by", "price.desc");
+
+  // Retry on 429
+  let attempt = 0;
+  while (attempt < 4) {
+    attempt++;
+
+    const r = await fetchJson(
+      url.toString(),
+      {
+        method: "GET",
+        headers: {
+          cookie: BUFF_COOKIE,
+          "user-agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+          accept: "application/json, text/plain, */*",
+          referer: "https://buff.163.com/",
+        },
+      },
+      20000
+    );
+
+    if (r.status === 429) {
+      // backoff
+      await sleep(600 * attempt);
+      continue;
+    }
+
+    if (!r.ok || !r.json) {
+      throw new Error(
+        `BUFF HTTP ${r.status}: ${r.json?.error?.message || r.text || "Unknown"}`
+      );
+    }
+
+    const items = parseBuffItems(r.json);
+    return items;
+  }
+
+  throw new Error("BUFF HTTP 429: rate limited");
+}
+
+// ---------- WHITE.MARKET (correct BUY OFFERS) ----------
+
+async function wmGraphql(query, variables) {
+  if (!WM_PARTNER_TOKEN) {
+    throw new Error("Missing WM_PARTNER_TOKEN env var");
+  }
+
+  const r = await fetchJson(
+    "https://api.white.market/graphql",
+    {
+      method: "POST",
+      headers: {
+        ...JSON_HEADERS,
+        // Some partner setups accept Authorization; some accept x-partner-token.
+        // Sending both is safe.
+        authorization: `Bearer ${WM_PARTNER_TOKEN}`,
+        "x-partner-token": WM_PARTNER_TOKEN,
+      },
+      body: JSON.stringify({ query, variables }),
     },
-    body: JSON.stringify({ query: `mutation { auth_token { accessToken } }` }),
-  });
+    20000
+  );
 
-  const j = await r.json().catch(() => ({}));
-  const token = j?.data?.auth_token?.accessToken;
-
-  if (!token) throw new Error("White.Market: failed to get accessToken");
-
-  wmCache.token = token;
-  wmCache.exp = now + 23 * 60 * 60 * 1000; // refresh early
-  return token;
+  if (!r.ok || !r.json) {
+    throw new Error(`WM HTTP ${r.status}: ${r.text || "Unknown"}`);
+  }
+  if (r.json.errors?.length) {
+    throw new Error(`WM GraphQL: ${r.json.errors[0]?.message || "Unknown error"}`);
+  }
+  return r.json.data;
 }
 
-async function wmHighestBuyOrder(nameHash) {
-  const accessToken = await wmGetAccessToken();
-
+async function wmResolveProductByName(name) {
+  // Resolve the correct slug + strict nameHash by searching market_list with nameStrict
   const query = `
-    query($nameHash: String!) {
-      order_list(
-        search: {
-          appId: CSGO
-          nameHash: $nameHash
-          nameStrict: true
-          sort: { field: PRICE, type: DESC }
-        }
-        forwardPagination: { first: 1 }
-      ) {
+    query MarketList($search: MarketProductSearchInput!, $first: Int!) {
+      market_list(search: $search, forwardPagination: { first: $first }) {
         edges {
           node {
+            slug
+            item {
+              order { nameHash }  # sometimes present
+            }
+            description {
+              marketHashName
+              iconUrl
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  // For CS2, appId enum is usually CSGO in their docs.
+  const data = await wmGraphql(query, {
+    search: {
+      appId: "CSGO",
+      name: name,
+      nameStrict: true,
+      distinctValues: true,
+      sort: { field: "CREATED", type: "DESC" },
+    },
+    first: 3,
+  });
+
+  const node = data?.market_list?.edges?.[0]?.node;
+  if (!node) return null;
+
+  const slug = node.slug;
+  const nameHash =
+    node?.item?.order?.nameHash || node?.description?.marketHashName || name;
+
+  return {
+    slug,
+    nameHash,
+    wmUrl: slug ? `https://white.market/item/${slug}` : "https://white.market/",
+  };
+}
+
+async function wmBestBuyOfferByNameHash(nameHash) {
+  // ✅ Correct: order_list sorted by PRICE DESC to get BEST buy offer (like the website)
+  const query = `
+    query BestBuy($search: MarketOrderPublicSearchInput!) {
+      order_list(search: $search, forwardPagination: { first: 1 }) {
+        edges {
+          node {
+            nameHash
             quantity
             price { value currency }
           }
@@ -134,122 +260,106 @@ async function wmHighestBuyOrder(nameHash) {
     }
   `;
 
-  const r = await fetch(WM_GQL_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      Authorization: `Bearer ${accessToken}`,
+  const data = await wmGraphql(query, {
+    search: {
+      appId: "CSGO",
+      nameHash,
+      distinctValues: false,
+      sort: { field: "PRICE", type: "DESC" },
     },
-    body: JSON.stringify({ query, variables: { nameHash } }),
   });
 
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || j?.errors?.length) {
-    const msg = j?.errors?.[0]?.message || `White.Market HTTP ${r.status}`;
-    throw new Error(msg);
-  }
+  const node = data?.order_list?.edges?.[0]?.node;
+  if (!node) return { wmPrice: 0, wmQty: 0 };
 
-  const node = j?.data?.order_list?.edges?.[0]?.node;
-  return {
-    priceUsd: node?.price?.value != null ? Number(node.price.value) : 0,
-    quantity: node?.quantity != null ? Number(node.quantity) : 0,
-  };
+  const value = Number(node?.price?.value || 0);
+  const currency = node?.price?.currency || "USD";
+
+  // If you ever get non-USD here, you can filter currency === "USD"
+  // (Most partners receive USD already.)
+  const wmPrice = Number.isFinite(value) ? value : 0;
+
+  return { wmPrice, wmQty: Number(node?.quantity || 0), currency };
 }
 
-// Simple concurrency limiter (so WM isn’t spammed)
-async function mapLimit(arr, limit, mapper) {
-  const ret = [];
-  let i = 0;
-  const workers = new Array(Math.min(limit, arr.length)).fill(0).map(async () => {
-    while (i < arr.length) {
-      const idx = i++;
-      ret[idx] = await mapper(arr[idx], idx);
-    }
-  });
-  await Promise.all(workers);
-  return ret;
-}
+// ---------- MAIN HANDLER ----------
 
-export async function handler(event) {
+export const handler = async (event) => {
   try {
-    const limit = Math.min(Math.max(parseInt(event.queryStringParameters?.limit || "20", 10), 1), 50);
-    const search = (event.queryStringParameters?.search || "").trim();
+    const limit = Math.min(
+      Math.max(Number(event.queryStringParameters?.limit || 30), 1),
+      100
+    );
 
-    const fx = Number(process.env.FX_CNYUSD || "0.14");
+    const buffItems = await fetchBuffTopList(limit);
 
-    // --- BUFF cache (60s) ---
-    const cacheKey = `${search}|${limit}`;
-    const now = Date.now();
+    // Small delay helps reduce 429 spikes
+    const out = [];
+    for (const it of buffItems) {
+      // Resolve WM product for correct slug + nameHash
+      const wmProduct = await wmResolveProductByName(it.name);
+      await sleep(120);
 
-    let buffItems;
-    if (buffCache.items?.length && buffCache.key === cacheKey && now - buffCache.ts < 60000) {
-      buffItems = buffCache.items;
-    } else {
-      buffItems = await buffGoodsList({ search, pageNum: 1, pageSize: limit });
-      buffCache = { ts: now, key: cacheKey, items: buffItems };
+      let wmPrice = 0;
+      let wmQty = 0;
+      let wmUrl = "https://white.market/";
+      let nameHash = it.name;
+
+      if (wmProduct?.nameHash) {
+        nameHash = wmProduct.nameHash;
+        wmUrl = wmProduct.wmUrl;
+        const best = await wmBestBuyOfferByNameHash(nameHash);
+        wmPrice = best.wmPrice || 0;
+        wmQty = best.wmQty || 0;
+      }
+
+      // Convert buff CNY -> USD for comparison
+      const buffUsd = it.buffPrice * FX_CNYUSD;
+
+      // Profit is WM buy offer minus Buff cost (optionally subtract WM fee)
+      const wmNet = wmPrice * (1 - WM_FEE);
+      const profit = wmNet - buffUsd;
+      const spread = buffUsd > 0 ? (profit / buffUsd) * 100 : 0;
+
+      out.push({
+        id: it.id,
+        name: it.name,
+        wear: it.wear || "",
+        image: it.image || "",
+        buffPrice: it.buffPrice, // CNY
+        wmPrice: wmPrice, // USD (BUY OFFER)
+        wmQty: wmQty,
+        fx: FX_CNYUSD,
+        wmUrl,
+        profit,
+        spread,
+        quantity: it.quantity ?? 0,
+      });
+
+      await sleep(120);
     }
 
-    // Build items without extra BUFF calls
-    const rows = buffItems
-      .map((it) => {
-        const goodsId = it?.id;
-        const rawNameHash = it?.market_hash_name || it?.name || it?.short_name;
-        if (!goodsId || !rawNameHash) return null;
-
-        // Normalize name a bit (helps with strict matching)
-        const nameHash = String(rawNameHash).replace(/\s+/g, " ").trim();
-
-        // Use BUFF's sell_min_price from goods list (no sell_order endpoint)
-        const buffPriceCny =
-          it?.sell_min_price != null ? Number(it.sell_min_price) :
-          it?.sell_min_price_cny != null ? Number(it.sell_min_price_cny) :
-          null;
-
-        const quantity =
-          it?.sell_num ?? it?.sell_count ?? it?.sell_total ?? it?.goods_info?.sell_num ?? 0;
-
-        const wear =
-          it?.goods_info?.info?.wear_name ||
-          it?.goods_info?.tags?.exterior ||
-          it?.tags?.exterior ||
-          "—";
-
-        const image =
-          normalizeUrl(it?.goods_info?.icon_url) ||
-          normalizeUrl(it?.icon_url) ||
-          normalizeUrl(it?.img) ||
-          "";
-
-        // ✅ Upgrade 1: Exact search link
-        const wmUrl = `https://white.market/search?search=${encodeURIComponent(nameHash)}`;
-
-        return {
-          id: goodsId,
-          name: nameHash,
-          wear,
-          image,
-          buffPrice: buffPriceCny ?? 0, // CNY
-          wmPrice: 0,                   // USD (filled later)
-          quantity: Number(quantity) || 0,
-          fx,
-          wmUrl
-        };
-      })
-      .filter(Boolean);
-
-    // Query WM for each item (limit concurrency to 4)
-    const withWM = await mapLimit(rows, 4, async (row) => {
-      try {
-        const wm = await wmHighestBuyOrder(row.name);
-        return { ...row, wmPrice: wm.priceUsd || 0 };
-      } catch {
-        // If WM errors for one item, don’t break the whole list
-        return { ...row, wmPrice: 0 };
-      }
-    });
-
-    return ok({ ok: true, items: withWM });
+    return {
+      statusCode: 200,
+      headers: {
+        ...JSON_HEADERS,
+        "access-control-allow-origin": "*",
+        "cache-control": "no-store",
+      },
+      body: JSON.stringify({ ok: true, items: out }),
+    };
   } catch (e) {
-    return fail(500, String(e?.message || e));
+    return {
+      statusCode: 200,
+      headers: {
+        ...JSON_HEADERS,
+        "access-control-allow-origin": "*",
+        "cache-control": "no-store",
+      },
+      body: JSON.stringify({
+        ok: false,
+        error: String(e?.message || e),
+      }),
+    };
   }
-}
+};
