@@ -1,368 +1,262 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { Search, ArrowUpDown, TrendingUp, Box, RefreshCw, Filter, ExternalLink } from "lucide-react";
+// src/App.jsx
+import React, { useMemo, useState } from "react";
 
-const App = () => {
-  const [searchTerm, setSearchTerm] = useState("");
-  const [sortConfig, setSortConfig] = useState({ key: "spread", direction: "desc" });
+export default function App() {
+  const [limit, setLimit] = useState(30);
   const [loading, setLoading] = useState(false);
-
+  const [err, setErr] = useState("");
   const [items, setItems] = useState([]);
-  const [fx, setFx] = useState(0.14);
 
-  // ✅ upgrade 1 + 2
-  const [hideZeroBuyOffers, setHideZeroBuyOffers] = useState(true);
-  const [onlyProfitable, setOnlyProfitable] = useState(false);
+  const fx = useMemo(() => items?.[0]?.fx ?? 0.14, [items]);
 
-  const fetchData = async () => {
+  const rows = useMemo(() => {
+    // Compute simple spread using FX (CNY -> USD)
+    // spread% = (wmPrice - buffUsd) / buffUsd
+    return (items || []).map((it) => {
+      const buffUsd = (Number(it.buffPrice) || 0) * (Number(it.fx) || fx || 0.14);
+      const wmUsd = Number(it.wmPrice) || 0;
+      const spread = buffUsd > 0 ? ((wmUsd - buffUsd) / buffUsd) * 100 : 0;
+      const net = wmUsd - buffUsd;
+      return { ...it, buffUsd, wmUsd, spread, net };
+    });
+  }, [items, fx]);
+
+  async function runScan() {
     setLoading(true);
+    setErr("");
     try {
-      const res = await fetch(`/.netlify/functions/scan?limit=30`, { cache: "no-store" });
+      const res = await fetch(`/.netlify/functions/scan?limit=${encodeURIComponent(limit)}`);
       const data = await res.json();
-      if (!res.ok || !data.ok) {
-        throw new Error(data?.error || "Scan failed");
-      }
-      setItems(Array.isArray(data.items) ? data.items : []);
-      setFx(Number(data.fx || 0.14));
+      if (!data.ok) throw new Error(data.error || "Scan failed");
+      setItems(data.items || []);
     } catch (e) {
-      alert(`Scan failed: ${e.message}`);
       setItems([]);
+      setErr(String(e?.message || e));
+      alert(`Scan failed: ${String(e?.message || e)}`);
     } finally {
       setLoading(false);
     }
-  };
-
-  useEffect(() => {
-    fetchData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Profit logic:
-  // BUFF is CNY. WM is USD.
-  // Convert BUFF->USD using fx (CNYUSD), then compare with WM buy offer.
-  const calculateMetrics = (item) => {
-    const buffCny = Number(item.buffPrice || 0);
-    const wmUsd = Number(item.wmPrice || 0);
-    const fxRate = Number(item.fx || fx || 0.14);
-
-    const buffUsd = buffCny * fxRate;
-    const profit = wmUsd - buffUsd;
-
-    const spread = buffUsd > 0 ? (profit / buffUsd) * 100 : 0;
-
-    return {
-      ...item,
-      fx: fxRate,
-      buffUsd,
-      profit,
-      spread,
-    };
-  };
-
-  const processedData = useMemo(() => {
-    let data = (items || []).map(calculateMetrics);
-
-    // Search filter
-    if (searchTerm) {
-      const lowerTerm = searchTerm.toLowerCase();
-      data = data.filter(
-        (item) =>
-          String(item.name).toLowerCase().includes(lowerTerm) ||
-          String(item.wear).toLowerCase().includes(lowerTerm)
-      );
-    }
-
-    // ✅ upgrade 1: hide $0 buy offers
-    if (hideZeroBuyOffers) {
-      data = data.filter((item) => Number(item.wmPrice || 0) > 0);
-    }
-
-    // ✅ upgrade 2: only profitable
-    if (onlyProfitable) {
-      data = data.filter((item) => item.profit > 0);
-    }
-
-    // Sorting
-    if (sortConfig.key) {
-      data.sort((a, b) => {
-        if (a[sortConfig.key] < b[sortConfig.key]) return sortConfig.direction === "asc" ? -1 : 1;
-        if (a[sortConfig.key] > b[sortConfig.key]) return sortConfig.direction === "asc" ? 1 : -1;
-        return 0;
-      });
-    }
-
-    return data;
-  }, [items, searchTerm, sortConfig, hideZeroBuyOffers, onlyProfitable, fx]);
-
-  const handleSort = (key) => {
-    let direction = "desc";
-    if (sortConfig.key === key && sortConfig.direction === "desc") direction = "asc";
-    setSortConfig({ key, direction });
-  };
-
-  const StatValue = (v) => (Number.isFinite(v) ? v : 0);
-
-  const profitableCount = processedData.filter((i) => i.profit > 0).length;
-  const avgSpread =
-    processedData.length > 0
-      ? processedData.reduce((acc, curr) => acc + StatValue(curr.spread), 0) / processedData.length
-      : 0;
-  const totalVolume = processedData.reduce((acc, curr) => acc + Number(curr.quantity || 0), 0);
+  }
 
   return (
-    <div className="min-h-screen bg-[#121212] text-gray-200 font-sans selection:bg-indigo-500 selection:text-white">
-      {/* Navbar */}
-      <nav className="border-b border-gray-800 bg-[#1a1b1e] sticky top-0 z-10 shadow-lg">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <div className="flex items-center gap-3">
-              <div className="bg-indigo-600 p-2 rounded-lg">
-                <TrendingUp size={20} className="text-white" />
-              </div>
-              <div>
-                <h1 className="text-xl font-bold text-white tracking-tight">
-                  Arbitrage<span className="text-indigo-400">Scanner</span>
-                </h1>
-                <p className="text-xs text-gray-500">Buff163 to WhiteMarket</p>
-              </div>
-            </div>
-
-            <div className="hidden md:flex items-center gap-6 text-sm text-gray-400">
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                Buff163 API: Server-side
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                WhiteMarket API: Server-side
-              </div>
-            </div>
-          </div>
-        </div>
-      </nav>
-
-      {/* Main */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Stats */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-          <StatCard label="Profitable Flips" value={profitableCount} icon={<TrendingUp size={18} />} color="text-green-400" />
-          <StatCard label="Avg. Spread" value={`${avgSpread.toFixed(2)}%`} icon={<Box size={18} />} color="text-blue-400" />
-          <StatCard label="Total Volume" value={totalVolume} icon={<Filter size={18} />} color="text-purple-400" />
-          <div
-            className="bg-[#1a1b1e] p-4 rounded-xl border border-gray-800 flex items-center justify-between hover:border-gray-700 transition-colors cursor-pointer group"
-            onClick={fetchData}
-          >
-            <div>
-              <p className="text-gray-500 text-xs font-medium uppercase tracking-wider">Data Status</p>
-              <p className="text-xl font-bold text-white mt-1 group-hover:text-indigo-400 transition-colors">
-                {loading ? "Updating..." : "Up to Date"}
-              </p>
-              <p className="text-[10px] text-gray-500 mt-1">FX CNY→USD: {Number(fx).toFixed(2)}</p>
-            </div>
-            <RefreshCw size={24} className={`text-gray-500 group-hover:text-indigo-400 transition-all ${loading ? "animate-spin" : ""}`} />
-          </div>
+    <div style={styles.page}>
+      <div style={styles.header}>
+        <div>
+          <div style={styles.title}>ArbitrageScanner</div>
+          <div style={styles.subTitle}>Buff163 → WhiteMarket (Buy offers)</div>
         </div>
 
-        {/* Search + Filters */}
-        <div className="flex flex-col gap-4 mb-6">
-          <div className="flex flex-col sm:flex-row gap-4">
-            <div className="relative flex-grow">
-              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                <Search size={18} className="text-gray-500" />
-              </div>
-              <input
-                type="text"
-                className="block w-full pl-10 pr-3 py-3 border border-gray-800 rounded-xl leading-5 bg-[#1a1b1e] text-gray-300 placeholder-gray-500 focus:outline-none focus:bg-[#202124] focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 sm:text-sm transition-all shadow-sm"
-                placeholder="Search skin name (e.g. Redline)..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-              />
-            </div>
-
-            <button className="flex items-center justify-center gap-2 px-6 py-3 border border-gray-800 text-sm font-medium rounded-xl text-gray-300 bg-[#1a1b1e] hover:bg-[#25262b] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 focus:ring-offset-[#121212] transition-colors">
-              <Filter size={18} />
-              Advanced Filters
-            </button>
-          </div>
-
-          {/* ✅ upgrade controls */}
-          <div className="flex items-center gap-6 text-sm text-gray-300">
-            <label className="flex items-center gap-2 select-none">
-              <input
-                type="checkbox"
-                checked={hideZeroBuyOffers}
-                onChange={(e) => setHideZeroBuyOffers(e.target.checked)}
-              />
-              Hide $0 buy offers
-            </label>
-
-            <label className="flex items-center gap-2 select-none">
-              <input
-                type="checkbox"
-                checked={onlyProfitable}
-                onChange={(e) => setOnlyProfitable(e.target.checked)}
-              />
-              Only profitable
-            </label>
-          </div>
+        <div style={styles.controls}>
+          <input
+            style={styles.input}
+            type="number"
+            min={1}
+            max={100}
+            value={limit}
+            onChange={(e) => setLimit(Number(e.target.value))}
+          />
+          <button style={styles.btn} onClick={runScan} disabled={loading}>
+            {loading ? "Scanning..." : "Scan"}
+          </button>
         </div>
-
-        {/* Table */}
-        <div className="bg-[#1a1b1e] rounded-xl border border-gray-800 shadow-xl overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-800">
-              <thead className="bg-[#151619]">
-                <tr>
-                  <Th label="Item Details" sortKey="name" onClick={() => handleSort("name")} sortConfig={sortConfig} align="left" />
-                  <Th label="Buff163 Price" sortKey="buffPrice" onClick={() => handleSort("buffPrice")} sortConfig={sortConfig} align="right" />
-                  <Th label="WM Buy Offer" sortKey="wmPrice" onClick={() => handleSort("wmPrice")} sortConfig={sortConfig} align="right" />
-                  <Th label="Spread" sortKey="spread" onClick={() => handleSort("spread")} sortConfig={sortConfig} align="right" />
-                  <Th label="Net Profit" sortKey="profit" onClick={() => handleSort("profit")} sortConfig={sortConfig} align="right" />
-                  <Th label="Quantity" sortKey="quantity" onClick={() => handleSort("quantity")} sortConfig={sortConfig} align="center" />
-                  <th className="px-6 py-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-                </tr>
-              </thead>
-
-              <tbody className="divide-y divide-gray-800">
-                {processedData.length > 0 ? (
-                  processedData.map((item) => (
-                    <tr key={`${item.id}-${item.name}`} className="hover:bg-[#202124] transition-colors group">
-                      {/* Item */}
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="flex items-center">
-                          <div className="flex-shrink-0 h-12 w-16 relative bg-gray-800 rounded-md flex items-center justify-center overflow-hidden border border-gray-700">
-                            {item.image ? (
-                              <img
-                                className="h-full object-contain transform group-hover:scale-110 transition-transform duration-300"
-                                src={item.image}
-                                alt=""
-                              />
-                            ) : null}
-                          </div>
-                          <div className="ml-4">
-                            <div className="text-sm font-medium text-white">{item.name}</div>
-                            <div className="text-xs text-gray-500">{item.wear || "-"}</div>
-                          </div>
-                        </div>
-                      </td>
-
-                      {/* BUFF */}
-                      <td className="px-6 py-4 whitespace-nowrap text-right">
-                        <div className="flex items-center justify-end text-sm text-gray-300 font-mono">
-                          <span className="text-xs text-gray-600 mr-1">¥</span>
-                          {Number(item.buffPrice || 0).toFixed(2)}
-                        </div>
-                        <div className="text-[10px] text-gray-500">≈ ${Number(item.buffUsd || 0).toFixed(2)} (FX)</div>
-                      </td>
-
-                      {/* WM */}
-                      <td className="px-6 py-4 whitespace-nowrap text-right">
-                        <div className="flex items-center justify-end text-sm text-gray-300 font-mono">
-                          <span className="text-xs text-gray-600 mr-1">$</span>
-                          {Number(item.wmPrice || 0).toFixed(2)}
-                        </div>
-                        <div className="text-[10px] text-gray-500">
-                          Buy offer {item.wmBuyQty ? `• ${item.wmBuyQty} items` : ""}
-                        </div>
-                      </td>
-
-                      {/* Spread */}
-                      <td className="px-6 py-4 whitespace-nowrap text-right">
-                        <span
-                          className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-md ${
-                            item.spread > 0
-                              ? "bg-green-900/30 text-green-400 border border-green-900"
-                              : "bg-red-900/30 text-red-400 border border-red-900"
-                          }`}
-                        >
-                          {item.spread > 0 ? "+" : ""}
-                          {Number(item.spread || 0).toFixed(2)}%
-                        </span>
-                      </td>
-
-                      {/* Profit */}
-                      <td className="px-6 py-4 whitespace-nowrap text-right">
-                        <div className={`text-sm font-mono font-bold ${item.profit > 0 ? "text-green-400" : "text-red-400"}`}>
-                          ${Number(item.profit || 0).toFixed(2)}
-                        </div>
-                      </td>
-
-                      {/* Quantity */}
-                      <td className="px-6 py-4 whitespace-nowrap text-center">
-                        <div className="text-sm text-gray-300">{item.quantity ?? 0}</div>
-                        <div className="w-full bg-gray-800 rounded-full h-1 mt-1">
-                          <div className="bg-indigo-500 h-1 rounded-full" style={{ width: `${Math.min((item.quantity || 0) * 2, 100)}%` }}></div>
-                        </div>
-                      </td>
-
-                      {/* Action */}
-                      <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                        <button
-                          className="text-indigo-400 hover:text-indigo-300 bg-indigo-900/20 p-2 rounded-lg hover:bg-indigo-900/40 transition-colors"
-                          onClick={() => window.open(item.wmUrl || "https://white.market/", "_blank")}
-                          title="Open on White.Market"
-                        >
-                          <ExternalLink size={16} />
-                        </button>
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan="7" className="px-6 py-12 text-center text-gray-500">
-                      <div className="flex flex-col items-center justify-center">
-                        <Search size={48} className="text-gray-700 mb-4" />
-                        <p className="text-lg font-medium">No items found</p>
-                        <p className="text-sm">Try adjusting your search terms</p>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          {/* Footer */}
-          <div className="bg-[#151619] px-4 py-3 border-t border-gray-800 flex items-center justify-between sm:px-6">
-            <div className="text-sm text-gray-500">
-              Showing <span className="font-medium text-gray-300">{processedData.length}</span> results
-            </div>
-          </div>
-        </div>
-      </main>
-    </div>
-  );
-};
-
-// Components
-const StatCard = ({ label, value, icon, color }) => (
-  <div className="bg-[#1a1b1e] p-4 rounded-xl border border-gray-800 flex items-center justify-between hover:border-gray-700 transition-colors">
-    <div>
-      <p className="text-gray-500 text-xs font-medium uppercase tracking-wider">{label}</p>
-      <p className={`text-2xl font-bold mt-1 ${color ? color : "text-white"}`}>{value}</p>
-    </div>
-    <div className={`p-3 rounded-lg bg-opacity-10 ${color ? color.replace("text-", "bg-") : "bg-gray-700"} ${color}`}>
-      {icon}
-    </div>
-  </div>
-);
-
-const Th = ({ label, sortKey, onClick, sortConfig, align = "left" }) => {
-  const isActive = sortConfig.key === sortKey;
-
-  return (
-    <th
-      scope="col"
-      className={`px-6 py-4 text-${align} text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-indigo-400 transition-colors select-none group`}
-      onClick={onClick}
-    >
-      <div className={`flex items-center gap-2 ${align === "right" ? "justify-end" : align === "center" ? "justify-center" : "justify-start"}`}>
-        {label}
-        <span className={`transform transition-opacity ${isActive ? "opacity-100" : "opacity-0 group-hover:opacity-50"}`}>
-          <ArrowUpDown size={14} className={isActive && sortConfig.direction === "asc" ? "transform rotate-180" : ""} />
-        </span>
       </div>
-    </th>
-  );
-};
 
-export default App;
+      <div style={styles.metaRow}>
+        <div style={styles.card}>
+          <div style={styles.cardLabel}>FX CNY→USD</div>
+          <div style={styles.cardValue}>{Number(fx).toFixed(2)}</div>
+        </div>
+        <div style={styles.card}>
+          <div style={styles.cardLabel}>Items</div>
+          <div style={styles.cardValue}>{rows.length}</div>
+        </div>
+        <div style={styles.card}>
+          <div style={styles.cardLabel}>Errors</div>
+          <div style={styles.cardValue}>
+            {(rows || []).filter((r) => r.wmError).length}
+          </div>
+        </div>
+      </div>
+
+      {err ? <div style={styles.error}>{err}</div> : null}
+
+      <div style={styles.tableWrap}>
+        <table style={styles.table}>
+          <thead>
+            <tr>
+              <th style={styles.th}>Item</th>
+              <th style={styles.thRight}>BUFF (CNY)</th>
+              <th style={styles.thRight}>BUFF (USD)</th>
+              <th style={styles.thRight}>WM Buy Offer (USD)</th>
+              <th style={styles.thRight}>Spread</th>
+              <th style={styles.thRight}>Net</th>
+              <th style={styles.th}>Link</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((it, idx) => (
+              <tr key={it.id ?? idx} style={styles.tr}>
+                <td style={styles.td}>
+                  <div style={styles.itemCell}>
+                    <img
+                      src={it.image}
+                      alt=""
+                      style={styles.icon}
+                      onError={(e) => (e.currentTarget.style.display = "none")}
+                    />
+                    <div>
+                      <div style={styles.itemName}>{it.name}</div>
+                      {it.wmError ? (
+                        <div style={styles.miniErr}>WM: {it.wmError}</div>
+                      ) : null}
+                    </div>
+                  </div>
+                </td>
+
+                <td style={styles.tdRight}>{Number(it.buffPrice || 0).toFixed(2)}</td>
+                <td style={styles.tdRight}>${Number(it.buffUsd || 0).toFixed(2)}</td>
+                <td style={styles.tdRight}>
+                  {Number(it.wmUsd || 0) > 0 ? `$${Number(it.wmUsd).toFixed(2)}` : "$0.00"}
+                </td>
+                <td style={styles.tdRight}>
+                  <span style={badge(it.spread)}>
+                    {Number.isFinite(it.spread) ? `${it.spread.toFixed(2)}%` : "0.00%"}
+                  </span>
+                </td>
+                <td style={styles.tdRight}>
+                  <span style={{ color: it.net >= 0 ? "#22c55e" : "#ef4444" }}>
+                    {it.net >= 0 ? "+" : "-"}${Math.abs(it.net).toFixed(2)}
+                  </span>
+                </td>
+                <td style={styles.td}>
+                  {it.wmUrl ? (
+                    <a style={styles.link} href={it.wmUrl} target="_blank" rel="noreferrer">
+                      Open
+                    </a>
+                  ) : (
+                    <span style={{ opacity: 0.6 }}>—</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+
+            {!rows.length ? (
+              <tr>
+                <td colSpan={7} style={{ padding: 20, opacity: 0.7 }}>
+                  No items found. Click “Scan”.
+                </td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function badge(spread) {
+  const ok = Number(spread) > 0;
+  return {
+    display: "inline-block",
+    padding: "4px 10px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,0.10)",
+    background: ok ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)",
+    color: ok ? "#22c55e" : "#ef4444",
+    fontWeight: 600,
+    fontSize: 12,
+  };
+}
+
+const styles = {
+  page: {
+    minHeight: "100vh",
+    background: "radial-gradient(1200px 600px at 50% 10%, #0c1a3a 0%, #070b16 55%)",
+    color: "#e7eefc",
+    fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial",
+    padding: 22,
+  },
+  header: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 16,
+    alignItems: "center",
+    marginBottom: 16,
+  },
+  title: { fontSize: 22, fontWeight: 800 },
+  subTitle: { fontSize: 12, opacity: 0.7, marginTop: 2 },
+  controls: { display: "flex", gap: 10, alignItems: "center" },
+  input: {
+    width: 90,
+    padding: "10px 12px",
+    borderRadius: 10,
+    background: "rgba(255,255,255,0.04)",
+    border: "1px solid rgba(255,255,255,0.10)",
+    color: "#e7eefc",
+    outline: "none",
+  },
+  btn: {
+    padding: "10px 14px",
+    borderRadius: 10,
+    background: "#3b6cff",
+    border: "none",
+    color: "white",
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  metaRow: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 },
+  card: {
+    flex: "0 0 auto",
+    minWidth: 160,
+    padding: 14,
+    borderRadius: 14,
+    background: "rgba(255,255,255,0.04)",
+    border: "1px solid rgba(255,255,255,0.10)",
+  },
+  cardLabel: { fontSize: 11, opacity: 0.7 },
+  cardValue: { fontSize: 20, fontWeight: 800, marginTop: 6 },
+  error: {
+    padding: 12,
+    borderRadius: 12,
+    border: "1px solid rgba(239,68,68,0.35)",
+    background: "rgba(239,68,68,0.12)",
+    marginBottom: 14,
+  },
+  tableWrap: {
+    overflow: "auto",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,0.10)",
+    background: "rgba(0,0,0,0.20)",
+  },
+  table: { width: "100%", borderCollapse: "collapse", minWidth: 980 },
+  th: {
+    textAlign: "left",
+    fontSize: 12,
+    opacity: 0.75,
+    padding: "14px 12px",
+    borderBottom: "1px solid rgba(255,255,255,0.10)",
+    position: "sticky",
+    top: 0,
+    background: "rgba(7,11,22,0.95)",
+    backdropFilter: "blur(6px)",
+  },
+  thRight: {
+    textAlign: "right",
+    fontSize: 12,
+    opacity: 0.75,
+    padding: "14px 12px",
+    borderBottom: "1px solid rgba(255,255,255,0.10)",
+    position: "sticky",
+    top: 0,
+    background: "rgba(7,11,22,0.95)",
+    backdropFilter: "blur(6px)",
+  },
+  tr: { borderBottom: "1px solid rgba(255,255,255,0.06)" },
+  td: { padding: "12px 12px", verticalAlign: "middle" },
+  tdRight: { padding: "12px 12px", textAlign: "right", verticalAlign: "middle" },
+  itemCell: { display: "flex", gap: 12, alignItems: "center" },
+  icon: { width: 44, height: 34, objectFit: "cover", borderRadius: 8, background: "rgba(255,255,255,0.04)" },
+  itemName: { fontWeight: 700, fontSize: 13 },
+  miniErr: { fontSize: 11, opacity: 0.75, marginTop: 2, color: "#f59e0b" },
+  link: { color: "#93c5fd", fontWeight: 700, textDecoration: "none" },
+};
