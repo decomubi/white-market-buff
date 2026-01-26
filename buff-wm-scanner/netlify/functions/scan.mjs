@@ -12,6 +12,55 @@ const MAX_ITEMS = 60;
 
 // ---- Helpers -------------------------------------------------------------
 
+import fetch from 'node-fetch'; // you already have this at the top
+
+// ---------- MarketCSGO price-list cache ----------
+let mcsgPriceCache = null;
+let mcsgPriceCacheTime = 0;
+
+async function getMcsgPriceMap() {
+  const now = Date.now();
+
+  // Simple 10-minute cache so we don’t hammer MarketCSGO
+  if (mcsgPriceCache && now - mcsgPriceCacheTime < 10 * 60 * 1000) {
+    return mcsgPriceCache;
+  }
+
+  const res = await fetch(
+    'https://market.csgo.com/api/v2/prices/class_instance/USD.json'
+  );
+
+  if (!res.ok) {
+    throw new Error(`MarketCSGO price list HTTP ${res.status}`);
+  }
+
+  const data = await res.json();
+
+  if (!data || data.success === false || !data.items) {
+    throw new Error('MarketCSGO price list: bad response');
+  }
+
+  // Build a Map keyed by market_hash_name
+  const map = new Map();
+
+  for (const key of Object.keys(data.items)) {
+    const item = data.items[key];
+    const name = item.market_hash_name;
+
+    if (!name) continue;
+
+    map.set(name, {
+      priceUsd: Number(item.price) || 0,       // listing price in USD
+      buyUsd: Number(item.buy_order) || 0,    // highest buy order in USD
+      // you can add more fields if you want later
+    });
+  }
+
+  mcsgPriceCache = map;
+  mcsgPriceCacheTime = now;
+  return map;
+}
+
 function jsonResponse(statusCode, payload) {
   return {
     statusCode,
