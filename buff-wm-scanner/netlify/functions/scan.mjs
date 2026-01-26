@@ -1,4 +1,4 @@
-// Netlify function: Buff163 (CS2) -> MarketCSGO (lowest sell offer)
+// Netlify function: Buff163 (CS) -> MarketCSGO (lowest sell offer)
 //
 // This keeps the same response shape your UI already expects.
 //
@@ -9,15 +9,15 @@
 //
 // Required env vars for LIVE mode:
 //
-//   BUFF163_COOKIE        – your Buff cookies string
-//   BUFF163_REFERER       – (optional) referer, default Buff CS2 market
+//   BUFF163_COOKIE        – your Buff cookies string (value of the Cookie header)
+//   BUFF163_REFERER       – (optional) referer, default Buff CSGO market
+//   BUFF_GAME             – (optional) "csgo" or "cs2", default "csgo"
 //   FX_CNY_USD            – CNY → USD rate (e.g. 0.14)
 //   MARKETCSGO_API_KEY    – API key from https://market.csgo.com/en/api
 //
 // NOTE: MarketCSGO part uses `search-item-by-hash-name` to get the
 // *lowest SELL price* for that hash_name. UI still says “buy order”,
-// but technically this is the best SELL. Later you can swap to the
-// `bid-ask` endpoint if you want actual buy orders.
+// but technically this is the best SELL.
 
 const BUFF_BASE = "https://buff.163.com";
 const MCSGO_BASE = "https://market.csgo.com/api/v2";
@@ -50,25 +50,17 @@ function fail(status, message, extra = {}) {
 
 // -------- BUFF163 client --------
 
+// Which game to query on Buff. Old script used CSGO, so we default to that.
+const BUFF_GAME = process.env.BUFF_GAME || "csgo"; // "csgo" or "cs2"
+
 const BUFF_COOKIE = process.env.BUFF163_COOKIE || "";
 const BUFF_REFERER =
-  process.env.BUFF163_REFERER || "https://buff.163.com/market/cs2";
+  process.env.BUFF163_REFERER || `https://buff.163.com/market/${BUFF_GAME}`;
 
-/**
- * Low-level BUFF fetch with query params + debug logging.
- * Logs status and first 200 chars of the response body to Netlify logs.
- */
-async function buffFetch(path, params = {}) {
-  const url = new URL(BUFF_BASE + path);
+async function buffFetch(path) {
+  const url = BUFF_BASE + path;
 
-  // Attach query params
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null && v !== "") {
-      url.searchParams.set(k, String(v));
-    }
-  }
-
-  const res = await fetch(url.toString(), {
+  const res = await fetch(url, {
     headers: {
       Cookie: BUFF_COOKIE,
       Referer: BUFF_REFERER,
@@ -80,33 +72,30 @@ async function buffFetch(path, params = {}) {
     },
   });
 
+  // For debugging bad states like "Login Required"
   const text = await res.text();
-
-  // DEBUG: see exactly what BUFF returns
-  console.log("BUFF DEBUG", {
-    url: url.toString(),
-    status: res.status,
-    snippet: text.slice(0, 200),
-  });
-
-  let json = null;
+  let json;
   try {
     json = JSON.parse(text);
-  } catch {
-    // Not JSON (probably HTML error page)
+  } catch (err) {
+    console.error("BUFF DEBUG (non-JSON)", {
+      url,
+      status: res.status,
+      snippet: text.slice(0, 200),
+    });
+    throw new Error(`BUFF non-JSON response HTTP ${res.status} at ${url}`);
   }
 
-  // BUFF success is usually either { code: "OK" } or { code: 0 }
-  const code = json && (json.code ?? json.data?.code);
-  const isOkCode = code === "OK" || code === 0;
+  console.info("BUFF DEBUG", {
+    url,
+    status: res.status,
+    snippet: text.slice(0, 100),
+  });
 
-  if (!res.ok || !isOkCode) {
-    const msg =
-      (json && (json.error || json.msg || json.message)) ||
-      text.slice(0, 120);
-
+  if (json.code !== "OK") {
+    // Typical error example: { code: "Login Required", error: "Please login." }
     throw new Error(
-      `BUFF HTTP ${res.status}, code=${code ?? "?"}, msg=${msg}`
+      `BUFF HTTP ${res.status}, code=${json.code || "Unknown"}, msg=${json.error || "Unknown"}`
     );
   }
 
@@ -117,16 +106,15 @@ async function buffFetch(path, params = {}) {
 async function fetchBuffItems(limit, fxCnyUsd) {
   const pageSize = Math.min(Math.max(1, limit), 60);
 
-  // Using query params instead of building the string manually
-  const data = await buffFetch("/api/market/goods", {
-    game: "csgo", // or "csgo" if that works better for your BUFF account
-    page_num: 1,
-    page_size: pageSize,
-    sort_by: "price.desc",
-  });
+  // Same style as your old WM scanner, but game is now configurable.
+  const data = await buffFetch(
+    `/api/market/goods?game=${encodeURIComponent(
+      BUFF_GAME
+    )}&page_num=1&page_size=${pageSize}&sort_by=price.desc`
+  );
 
-  const goodsInfos = data.data?.goods_infos || {};
-  const items = data.data?.items || [];
+  const goodsInfos = data.data.goods_infos || {};
+  const items = data.data.items || [];
 
   return items.slice(0, limit).map((row, idx) => {
     const goods = goodsInfos[row.goods_id] || {};
@@ -226,7 +214,8 @@ async function mcsgoBestSell(hashName) {
 
     // examples show `price` field on each entry
     const best = list.reduce(
-      (min, item) => (Number(item.price) < Number(min.price) ? item : min),
+      (min, item) =>
+        Number(item.price) < Number(min.price) ? item : min,
       list[0]
     );
 
