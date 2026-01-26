@@ -1,350 +1,439 @@
-import React, { useState, useMemo, useEffect } from "react";
-import {
-  Search, ArrowUpDown, TrendingUp, DollarSign, Box, RefreshCw, Filter, ExternalLink
-} from "lucide-react";
+import React, { useState, useEffect, useMemo } from 'react';
+import { Search, ArrowUpDown, TrendingUp, DollarSign, Box, RefreshCw, Filter, ExternalLink } from 'lucide-react';
 
-// Mock data placeholder (the real data comes from Netlify function)
-const MOCK_DATA = [];
+export default function App() {
+  const [items, setItems] = useState([]);
+  const [detailsOpen, setDetailsOpen] = useState({});
+  const [detailsById, setDetailsById] = useState({});
+  const [detailsLoading, setDetailsLoading] = useState({});
+  const [isLoading, setIsLoading] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [fxRate, setFxRate] = useState(0.14);
 
-const App = () => {
-  const [items, setItems] = useState(MOCK_DATA);
-  const [expandedId, setExpandedId] = useState(null);
-  const [fx, setFx] = useState(0.14);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [query, setQuery] = useState("");
-  const [sortConfig, setSortConfig] = useState({ key: "profitPct", direction: "desc" });
-  const [limit, setLimit] = useState(30);
+  const [scanLimit, setScanLimit] = useState(30);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [showOnlyProfitable, setShowOnlyProfitable] = useState(false);
+  const [hideZeroBuyOffers, setHideZeroBuyOffers] = useState(false);
 
-  // Fetch data from Netlify Function
+  const [sortConfig, setSortConfig] = useState({ key: 'spread', direction: 'desc' });
+
+  const [isFiltersOpen, setIsFiltersOpen] = useState(false);
+  const [minSpread, setMinSpread] = useState(5);
+  const [minProfit, setMinProfit] = useState(1);
+  const [maxBuffPrice, setMaxBuffPrice] = useState(999999);
+
   const fetchData = async () => {
-    setLoading(true);
-    setExpandedId(null);
-    setError("");
+    setIsLoading(true);
     try {
-      const res = await fetch(`/.netlify/functions/scan?limit=${limit}`);
-      const json = await res.json();
-      if (!json.ok) throw new Error(json.error || "Scan failed");
-      setItems(json.items || []);
-      setFx(json.fx || fx);
-    } catch (e) {
-      setError(String(e.message || e));
+      const res = await fetch(`/.netlify/functions/scan?limit=${encodeURIComponent(scanLimit)}`);
+      const data = await res.json();
+      if (data?.ok) {
+        setItems(data.items || []);
+        setFxRate(data.fx || 0.14);
+        setLastUpdated(new Date());
+      } else {
+        console.error(data?.error || 'Scan failed');
+        setItems([]);
+      }
+    } catch (err) {
+      console.error(err);
+      setItems([]);
     } finally {
-      setLoading(false);
+      setIsLoading(false);
+    }
+  };
+
+  const fetchDetails = async (item) => {
+    try {
+      setDetailsLoading((p) => ({ ...p, [item.id]: true }));
+      const url = `/.netlify/functions/scan?goods_id=${encodeURIComponent(item.id)}&hash_name=${encodeURIComponent(item.name)}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data?.ok) {
+        setDetailsById((p) => ({ ...p, [item.id]: data }));
+      } else {
+        setDetailsById((p) => ({ ...p, [item.id]: { ok: false, error: data?.error || "Failed to load details" } }));
+      }
+    } catch (e) {
+      setDetailsById((p) => ({ ...p, [item.id]: { ok: false, error: e?.message || String(e) } }));
+    } finally {
+      setDetailsLoading((p) => ({ ...p, [item.id]: false }));
+    }
+  };
+
+  const toggleDetails = (item) => {
+    setDetailsOpen((p) => {
+      const next = { ...p, [item.id]: !p[item.id] };
+      return next;
+    });
+    const willOpen = !detailsOpen[item.id];
+    if (willOpen && !detailsById[item.id] && !detailsLoading[item.id]) {
+      fetchDetails(item);
     }
   };
 
   useEffect(() => {
-    // optional: auto load once
-    // fetchData();
+    fetchData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Compute metrics + filtering + sorting
   const processedData = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const processed = items.map(item => {
+      const buffUsd = (Number(item.buffPrice || 0) * (Number(item.fx || fxRate) || fxRate));
+      const mcBuy = Number(item.wmPrice || 0);
 
-    const filtered = items.filter((item) => {
-      if (!q) return true;
-      return (item.name || "").toLowerCase().includes(q);
-    });
-
-    const mapped = filtered.map((item) => {
-      // BUFF is CNY, MarketCSGO buy order is USD
-      const buffCny = Number(item.buffPrice || 0);
-      const wmUsd = Number(item.wmPrice || 0);
-
-      const buffUsd = buffCny * fx;
-
-      const net = wmUsd - buffUsd;
-      const profitPct = buffUsd > 0 ? (net / buffUsd) * 100 : -100;
-      const spread = profitPct;
+      const spread = buffUsd > 0 ? ((mcBuy - buffUsd) / buffUsd) * 100 : 0;
+      const netProfit = mcBuy - buffUsd;
 
       return {
         ...item,
         buffUsd,
-        net,
-        profitPct,
+        mcBuy,
         spread,
+        netProfit
       };
     });
 
-    const sorted = [...mapped].sort((a, b) => {
-      const { key, direction } = sortConfig;
-      const av = a[key] ?? 0;
-      const bv = b[key] ?? 0;
-      const cmp = av > bv ? 1 : av < bv ? -1 : 0;
-      return direction === "asc" ? cmp : -cmp;
-    });
+    let filtered = processed.filter(item =>
+      item.name.toLowerCase().includes(searchTerm.toLowerCase())
+    );
 
-    return sorted;
-  }, [items, fx, query, sortConfig]);
+    if (hideZeroBuyOffers) filtered = filtered.filter(item => item.mcBuy > 0);
+    if (showOnlyProfitable) filtered = filtered.filter(item => item.netProfit > 0);
+
+    filtered = filtered.filter(item =>
+      item.spread >= minSpread &&
+      item.netProfit >= minProfit &&
+      item.buffUsd <= maxBuffPrice
+    );
+
+    if (sortConfig.key) {
+      filtered.sort((a, b) => {
+        const aVal = a[sortConfig.key];
+        const bVal = b[sortConfig.key];
+        if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
+        if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
+        return 0;
+      });
+    }
+
+    return filtered;
+  }, [items, searchTerm, showOnlyProfitable, hideZeroBuyOffers, sortConfig, minSpread, minProfit, maxBuffPrice, fxRate]);
 
   const stats = useMemo(() => {
-    const profitable = processedData.filter((x) => x.net > 0);
-    const avgSpread =
-      processedData.length > 0
-        ? processedData.reduce((sum, x) => sum + (x.spread || 0), 0) / processedData.length
-        : 0;
-
-    const totalVolume = processedData.reduce((sum, x) => sum + Number(x.quantity || 0), 0);
-
-    return {
-      profitableCount: profitable.length,
-      avgSpread,
-      totalVolume,
-    };
+    const profitable = processedData.filter(item => item.netProfit > 0).length;
+    const avgSpread = processedData.length > 0
+      ? processedData.reduce((sum, item) => sum + item.spread, 0) / processedData.length
+      : 0;
+    const totalVolume = processedData.reduce((sum, item) => sum + (Number(item.quantity || 0)), 0);
+    return { profitable, avgSpread, totalVolume };
   }, [processedData]);
 
   const requestSort = (key) => {
-    setSortConfig((prev) => {
-      if (prev.key === key) {
-        return { key, direction: prev.direction === "asc" ? "desc" : "asc" };
-      }
-      return { key, direction: "desc" };
-    });
+    let direction = 'desc';
+    if (sortConfig.key === key && sortConfig.direction === 'desc') direction = 'asc';
+    setSortConfig({ key, direction });
   };
 
   return (
-    <div className="min-h-screen bg-[#0b0c10] text-white">
-      <header className="sticky top-0 z-10 bg-[#0b0c10]/90 backdrop-blur border-b border-gray-800">
-        <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-bold tracking-tight flex items-center gap-2">
-              <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600/20 text-indigo-400">
-                <TrendingUp size={18} />
-              </span>
-              ArbitrageScanner
-            </h1>
-            <p className="text-xs text-gray-400 mt-1">Buff163 to MarketCSGO</p>
+    <div className="min-h-screen bg-[#0b0e14] text-gray-100">
+      <div className="max-w-6xl mx-auto p-6">
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500/40 to-purple-500/30 flex items-center justify-center border border-indigo-500/20">
+              <TrendingUp className="w-5 h-5 text-indigo-200" />
+            </div>
+            <div>
+              <div className="text-xl font-bold tracking-tight">ArbitrageScanner</div>
+              <div className="text-sm text-gray-400">Buff163 to MarketCSGO</div>
+            </div>
           </div>
 
-          <div className="flex items-center gap-3 text-xs text-gray-400">
+          <div className="flex items-center gap-3 text-sm text-gray-300">
             <div className="flex items-center gap-2">
-              <span className="h-2 w-2 rounded-full bg-green-500"></span>
+              <span className="inline-block w-2 h-2 rounded-full bg-green-500" />
               Buff163 API: Server-side
             </div>
             <div className="flex items-center gap-2">
-              <span className="h-2 w-2 rounded-full bg-green-500"></span>
+              <span className="inline-block w-2 h-2 rounded-full bg-green-500" />
               MarketCSGO API: Server-side
             </div>
           </div>
         </div>
-      </header>
 
-      <main className="max-w-6xl mx-auto px-4 py-6">
-        {/* Stats */}
-        <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
-          <StatCard
-            label="Profitable flips"
-            value={stats.profitableCount}
-            icon={<TrendingUp size={18} />}
-            color="text-green-400"
-          />
-          <StatCard
-            label="Avg. spread"
-            value={`${stats.avgSpread.toFixed(2)}%`}
-            icon={<DollarSign size={18} />}
-            color={stats.avgSpread >= 0 ? "text-green-400" : "text-red-400"}
-          />
-          <StatCard
-            label="Total volume"
-            value={stats.totalVolume}
-            icon={<Box size={18} />}
-            color="text-indigo-400"
-          />
-          <StatCard
-            label="Data status"
-            value={loading ? "Scanning..." : "Up to Date"}
-            icon={<RefreshCw size={18} className={loading ? "animate-spin" : ""} />}
-            color="text-purple-400"
-          />
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+          <div className="rounded-2xl bg-[#121318] border border-gray-800 p-4">
+            <div className="text-xs text-gray-400 mb-2">PROFITABLE FLIPS</div>
+            <div className="flex items-center justify-between">
+              <div className="text-2xl font-bold text-green-400">{stats.profitable}</div>
+              <div className="w-10 h-10 rounded-xl bg-green-500/10 flex items-center justify-center border border-green-500/20">
+                <TrendingUp className="w-5 h-5 text-green-300" />
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-2xl bg-[#121318] border border-gray-800 p-4">
+            <div className="text-xs text-gray-400 mb-2">AVG. SPREAD</div>
+            <div className="flex items-center justify-between">
+              <div className={`text-2xl font-bold ${stats.avgSpread > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {stats.avgSpread.toFixed(2)}%
+              </div>
+              <div className="w-10 h-10 rounded-xl bg-blue-500/10 flex items-center justify-center border border-blue-500/20">
+                <ArrowUpDown className="w-5 h-5 text-blue-300" />
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-2xl bg-[#121318] border border-gray-800 p-4">
+            <div className="text-xs text-gray-400 mb-2">TOTAL VOLUME</div>
+            <div className="flex items-center justify-between">
+              <div className="text-2xl font-bold text-indigo-300">{stats.totalVolume}</div>
+              <div className="w-10 h-10 rounded-xl bg-indigo-500/10 flex items-center justify-center border border-indigo-500/20">
+                <Box className="w-5 h-5 text-indigo-300" />
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-2xl bg-[#121318] border border-gray-800 p-4">
+            <div className="text-xs text-gray-400 mb-2">DATA STATUS</div>
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-lg font-bold">Up to Date</div>
+                <div className="text-xs text-gray-500">FX CNY→USD: {fxRate}</div>
+              </div>
+              <button
+                onClick={fetchData}
+                disabled={isLoading}
+                className="w-10 h-10 rounded-xl bg-purple-500/10 flex items-center justify-center border border-purple-500/20 hover:bg-purple-500/20 transition-colors disabled:opacity-50"
+              >
+                <RefreshCw className={`w-5 h-5 text-purple-300 ${isLoading ? 'animate-spin' : ''}`} />
+              </button>
+            </div>
+          </div>
         </div>
 
-        {/* Controls */}
-        <div className="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between mb-4">
-          <div className="flex-1 relative">
-            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+        <div className="flex flex-col md:flex-row gap-4 mb-6">
+          <div className="relative flex-1">
+            <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-500" />
             <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
               placeholder="Search skin name (e.g. Redline)..."
-              className="w-full pl-10 pr-3 py-2 rounded-xl bg-[#151619] border border-gray-800 text-sm placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-indigo-600/40"
+              className="w-full bg-[#121318] border border-gray-800 rounded-2xl pl-11 pr-4 py-3 text-sm outline-none focus:border-indigo-500/40"
             />
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             <button
-              className="px-3 py-2 rounded-xl bg-[#151619] border border-gray-800 text-sm text-gray-300 hover:bg-[#202124] inline-flex items-center gap-2"
-              onClick={() => {}}
-              title="(placeholder) Advanced filters"
+              onClick={() => setIsFiltersOpen(!isFiltersOpen)}
+              className="flex items-center gap-2 bg-[#121318] border border-gray-800 rounded-2xl px-4 py-3 text-sm hover:border-gray-700 transition-colors"
             >
-              <Filter size={16} />
+              <Filter className="w-4 h-4" />
               Advanced Filters
             </button>
 
             <input
               type="number"
-              value={limit}
+              value={scanLimit}
+              onChange={(e) => setScanLimit(Number(e.target.value))}
+              className="w-20 bg-[#121318] border border-gray-800 rounded-2xl px-4 py-3 text-sm outline-none focus:border-indigo-500/40 text-center"
               min={1}
-              max={100}
-              onChange={(e) => setLimit(Number(e.target.value || 30))}
-              className="w-20 px-3 py-2 rounded-xl bg-[#151619] border border-gray-800 text-sm text-gray-200 focus:outline-none"
-              title="Scan limit"
+              max={60}
             />
 
             <button
               onClick={fetchData}
-              disabled={loading}
-              className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-sm font-semibold inline-flex items-center gap-2"
+              disabled={isLoading}
+              className="bg-indigo-600 hover:bg-indigo-700 rounded-2xl px-6 py-3 text-sm font-medium transition-colors disabled:opacity-50"
             >
-              {loading ? <RefreshCw size={16} className="animate-spin" /> : null}
-              Scan
+              {isLoading ? 'Scanning...' : 'Scan'}
             </button>
           </div>
         </div>
 
-        {error ? (
-          <div className="mb-4 rounded-xl border border-red-900/50 bg-red-900/20 px-4 py-3 text-sm text-red-200">
-            {error}
-          </div>
-        ) : null}
+        {isFiltersOpen && (
+          <div className="rounded-2xl bg-[#121318] border border-gray-800 p-6 mb-6">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+              <div>
+                <label className="block text-sm font-medium mb-2">Min Spread (%)</label>
+                <input
+                  type="number"
+                  value={minSpread}
+                  onChange={(e) => setMinSpread(Number(e.target.value))}
+                  className="w-full bg-[#0b0e14] border border-gray-800 rounded-xl px-4 py-2 text-sm outline-none focus:border-indigo-500/40"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-2">Min Profit ($)</label>
+                <input
+                  type="number"
+                  value={minProfit}
+                  onChange={(e) => setMinProfit(Number(e.target.value))}
+                  className="w-full bg-[#0b0e14] border border-gray-800 rounded-xl px-4 py-2 text-sm outline-none focus:border-indigo-500/40"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-2">Max BUFF Price ($)</label>
+                <input
+                  type="number"
+                  value={maxBuffPrice}
+                  onChange={(e) => setMaxBuffPrice(Number(e.target.value))}
+                  className="w-full bg-[#0b0e14] border border-gray-800 rounded-xl px-4 py-2 text-sm outline-none focus:border-indigo-500/40"
+                />
+              </div>
+            </div>
 
-        {/* Table */}
-        <div className="bg-[#151619] border border-gray-800 rounded-2xl overflow-hidden shadow-lg">
+            <div className="flex flex-col md:flex-row gap-4">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={hideZeroBuyOffers}
+                  onChange={(e) => setHideZeroBuyOffers(e.target.checked)}
+                  className="rounded"
+                />
+                <span className="text-sm">Hide $0 buy offers</span>
+              </label>
+
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showOnlyProfitable}
+                  onChange={(e) => setShowOnlyProfitable(e.target.checked)}
+                  className="rounded"
+                />
+                <span className="text-sm">Only profitable</span>
+              </label>
+            </div>
+          </div>
+        )}
+
+        <div className="rounded-2xl bg-[#121318] border border-gray-800 overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-800">
-              <thead className="bg-[#111214]">
+            <table className="w-full">
+              <thead className="bg-[#0f1016] border-b border-gray-800">
                 <tr>
-                  <Th label="Item Details" sortKey="name" onClick={() => requestSort("name")} sortConfig={sortConfig} />
-                  <Th label="BUFF163 Price" sortKey="buffUsd" onClick={() => requestSort("buffUsd")} sortConfig={sortConfig} align="right" />
-                  <Th label="MCSGO Buy Order" sortKey="wmPrice" onClick={() => requestSort("wmPrice")} sortConfig={sortConfig} align="right" />
-                  <Th label="Spread" sortKey="profitPct" onClick={() => requestSort("profitPct")} sortConfig={sortConfig} align="center" />
-                  <Th label="Net Profit" sortKey="net" onClick={() => requestSort("net")} sortConfig={sortConfig} align="right" />
-                  <Th label="Quantity" sortKey="quantity" onClick={() => requestSort("quantity")} sortConfig={sortConfig} align="center" />
-                  <th scope="col" className="px-6 py-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Actions
-                  </th>
+                  <th className="px-6 py-4 text-left text-xs font-medium text-gray-400 uppercase">Item Details</th>
+                  <th onClick={() => requestSort('buffUsd')} className="px-6 py-4 text-right text-xs font-medium text-gray-400 uppercase cursor-pointer">BUFF163 Price</th>
+                  <th onClick={() => requestSort('mcBuy')} className="px-6 py-4 text-right text-xs font-medium text-gray-400 uppercase cursor-pointer">MCSGO Buy Order</th>
+                  <th onClick={() => requestSort('spread')} className="px-6 py-4 text-right text-xs font-medium text-gray-400 uppercase cursor-pointer">Spread</th>
+                  <th onClick={() => requestSort('netProfit')} className="px-6 py-4 text-right text-xs font-medium text-gray-400 uppercase cursor-pointer">Net Profit</th>
+                  <th className="px-6 py-4 text-right text-xs font-medium text-gray-400 uppercase">Quantity</th>
+                  <th className="px-6 py-4 text-right text-xs font-medium text-gray-400 uppercase">Actions</th>
                 </tr>
               </thead>
 
               <tbody className="divide-y divide-gray-800">
-                {processedData.length ? (
+                {processedData.length > 0 ? (
                   processedData.map((item) => (
                     <React.Fragment key={item.id}>
-                      <tr
-                        key={item.id}
-                        onClick={() => setExpandedId(expandedId === item.id ? null : item.id)}
-                        className="hover:bg-[#202124] transition-colors group cursor-pointer"
-                      >
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <div className="flex items-center">
-                            <div className="flex-shrink-0 h-12 w-12 bg-[#25262b] rounded-lg overflow-hidden mr-4 border border-gray-700 group-hover:border-indigo-500 transition-colors">
-                              <img src={item.image} alt="" className="h-full w-full object-contain p-1" />
+                      <tr className="hover:bg-[#151720] transition-colors">
+                        <td className="px-6 py-4">
+                          <div className="flex items-center gap-4">
+                            <div className="w-12 h-12 rounded-xl bg-[#0b0e14] border border-gray-800 flex items-center justify-center overflow-hidden">
+                              {item.image ? (
+                                <img src={item.image} alt={item.name} className="w-full h-full object-contain" />
+                              ) : null}
                             </div>
                             <div>
-                              <div className="text-sm font-medium text-white group-hover:text-indigo-400 transition-colors">{item.name}</div>
-                              <div className="text-xs text-gray-500 mt-0.5">{item.wear || "-"}</div>
-                              {item.error ? (
-                                <div className="text-xs text-amber-400 mt-1">API: {item.error}</div>
+                              <div className="font-medium text-sm">{item.name}</div>
+                              {item.wmErr ? (
+                                <div className="text-xs text-amber-400 mt-1">API: {item.wmErr}</div>
                               ) : null}
                             </div>
                           </div>
                         </td>
 
-                        <td className="px-6 py-4 whitespace-nowrap text-right">
-                          <div className="text-sm font-medium text-white">¥{Number(item.buffPrice).toFixed(2)}</div>
-                          <div className="text-xs text-gray-500">${Number(item.buffUsd).toFixed(2)}</div>
+                        <td className="px-6 py-4 text-right">
+                          <div className="text-sm font-medium">¥ {Number(item.buffPrice || 0).toFixed(2)}</div>
+                          <div className="text-xs text-gray-500">$ {Number(item.buffUsd || 0).toFixed(2)} (FX)</div>
                         </td>
 
-                        <td className="px-6 py-4 whitespace-nowrap text-right">
-                          <div className="text-sm font-medium text-white">${Number(item.wmPrice).toFixed(2)}</div>
+                        <td className="px-6 py-4 text-right">
+                          <div className="text-sm font-medium">$ {Number(item.mcBuy || 0).toFixed(2)}</div>
                           <div className="text-xs text-gray-500">{item.wmBuyQty || 0} orders</div>
                         </td>
 
-                        <td className="px-6 py-4 whitespace-nowrap text-center">
-                          <span
-                            className={`px-3 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                              item.profitPct > 0
-                                ? "bg-green-900/30 text-green-400 border border-green-800"
-                                : "bg-red-900/30 text-red-400 border border-red-800"
-                            }`}
-                          >
-                            {item.profitPct.toFixed(2)}%
+                        <td className="px-6 py-4 text-right">
+                          <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${item.spread > 0 ? 'bg-green-500/10 text-green-300 border border-green-500/20' : 'bg-red-500/10 text-red-300 border border-red-500/20'}`}>
+                            {item.spread.toFixed(2)}%
                           </span>
                         </td>
 
-                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                          <span className={item.net > 0 ? "text-green-400" : "text-red-400"}>
-                            {item.net > 0 ? "+" : ""}${item.net.toFixed(2)}
-                          </span>
+                        <td className="px-6 py-4 text-right">
+                          <div className={`text-sm font-medium ${item.netProfit > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            ${item.netProfit.toFixed(2)}
+                          </div>
                         </td>
 
-                        <td className="px-6 py-4 whitespace-nowrap text-center">
-                          <div className="text-sm text-gray-300">{item.quantity}</div>
-                          <div className="w-full bg-gray-800 rounded-full h-1.5 mt-1">
-                            <div
-                              className="bg-indigo-500 h-1.5 rounded-full"
-                              style={{ width: `${Math.min(100, (item.quantity / 1000) * 100)}%` }}
-                            ></div>
+                        <td className="px-6 py-4 text-right">
+                          <div className="text-sm font-medium">{item.quantity}</div>
+                          <div className="w-20 h-1.5 bg-gray-800 rounded-full ml-auto mt-2">
+                            <div className="h-full bg-indigo-500 rounded-full" style={{ width: `${Math.min(100, (item.quantity / 1500) * 100)}%` }} />
                           </div>
                         </td>
 
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                          <button
+                            onClick={() => toggleDetails(item)}
+                            className="inline-flex items-center px-3 py-1.5 mr-2 rounded-lg bg-[#2a2d35] hover:bg-[#343845] text-gray-200 transition-colors text-xs"
+                          >
+                            Details
+                          </button>
+
                           <a
-                            href={item.wmUrl || "https://market.csgo.com/en/"}
+                            href={item.wmUrl || `https://market.csgo.com/en/?search=${encodeURIComponent(item.name)}`}
                             target="_blank"
                             rel="noreferrer"
-                            onClick={(e) => e.stopPropagation()}
-                            className="text-indigo-400 hover:text-indigo-300 bg-indigo-900/20 p-2 rounded-lg hover:bg-indigo-900/40 transition-colors inline-flex"
+                            className="inline-flex items-center justify-center w-9 h-9 rounded-xl bg-indigo-500/10 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors"
                           >
-                            <ExternalLink size={16} />
+                            <ExternalLink className="w-4 h-4 text-indigo-300" />
                           </a>
                         </td>
                       </tr>
 
-                      {expandedId === item.id && (
-                        <tr className="bg-[#17181b]">
+                      {detailsOpen[item.id] && (
+                        <tr className="bg-[#16181d]">
                           <td colSpan={7} className="px-6 py-4">
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                              <div className="bg-[#141517] border border-gray-800 rounded-xl p-4">
-                                <div className="text-sm font-semibold text-white mb-2">BUFF lowest 5 listings</div>
-                                {Array.isArray(item.buffListings) && item.buffListings.length > 0 ? (
-                                  <div className="space-y-1 text-sm text-gray-300">
-                                    {item.buffListings.slice(0, 5).map((l, idx) => (
-                                      <div key={idx} className="flex items-center justify-between">
-                                        <span className="text-gray-400">#{idx + 1}</span>
-                                        <span className="font-medium">¥{Number(l.priceCny || 0).toFixed(2)}</span>
-                                        <span className="text-gray-400">
-                                          float: {l.float == null ? "-" : Number(l.float).toFixed(6)}
-                                        </span>
+                              <div className="rounded-xl border border-gray-800 bg-[#121318] p-4">
+                                <div className="text-sm font-semibold text-gray-100 mb-2">BUFF lowest 5 listings</div>
+                                {detailsLoading[item.id] && !detailsById[item.id] ? (
+                                  <div className="text-sm text-gray-400">Loading…</div>
+                                ) : detailsById[item.id]?.ok ? (
+                                  <div className="space-y-2">
+                                    {(detailsById[item.id]?.buff?.listings || []).map((l, idx) => (
+                                      <div key={idx} className="flex items-center justify-between text-sm">
+                                        <div className="text-gray-300">#{idx + 1}</div>
+                                        <div className="text-gray-200">¥ {Number(l.priceCny).toFixed(2)}</div>
+                                        <div className="text-gray-400">float: {l.float ?? "—"}</div>
                                       </div>
                                     ))}
                                   </div>
                                 ) : (
-                                  <div className="text-sm text-gray-500">No float listings returned.</div>
+                                  <div className="text-sm text-amber-400">{detailsById[item.id]?.error || "Click Details to load"}</div>
                                 )}
                               </div>
 
-                              <div className="bg-[#141517] border border-gray-800 rounded-xl p-4">
-                                <div className="text-sm font-semibold text-white mb-2">MarketCSGO buy order</div>
-                                <div className="text-sm text-gray-300">
-                                  <div className="flex items-center justify-between">
-                                    <span className="text-gray-400">Best buy order</span>
-                                    <span className="font-semibold text-white">
-                                      ${Number(item.wmPrice || 0).toFixed(2)}
-                                    </span>
+                              <div className="rounded-xl border border-gray-800 bg-[#121318] p-4">
+                                <div className="text-sm font-semibold text-gray-100 mb-2">MarketCSGO</div>
+                                {detailsById[item.id]?.ok ? (
+                                  <div className="space-y-2 text-sm">
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-gray-400">Best buy order</span>
+                                      <span className="text-gray-200">$ {Number(detailsById[item.id]?.mc?.bestBuy || 0).toFixed(2)}</span>
+                                    </div>
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-gray-400">Buy order qty</span>
+                                      <span className="text-gray-200">{detailsById[item.id]?.mc?.bestBuyQty || 0}</span>
+                                    </div>
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-gray-400">Best sell</span>
+                                      <span className="text-gray-200">$ {Number(detailsById[item.id]?.mc?.bestSell || 0).toFixed(2)}</span>
+                                    </div>
                                   </div>
-                                  <div className="flex items-center justify-between mt-2">
-                                    <span className="text-gray-400">Avg price (if available)</span>
-                                    <span className="text-gray-300">
-                                      {item.wmMeta?.avgUsd == null ? "-" : `$${Number(item.wmMeta.avgUsd).toFixed(2)}`}
-                                    </span>
-                                  </div>
-                                  {item.error ? (
-                                    <div className="mt-3 text-xs text-amber-400">API note: {item.error}</div>
-                                  ) : null}
-                                </div>
+                                ) : (
+                                  <div className="text-sm text-amber-400">{detailsById[item.id]?.error || "No details yet"}</div>
+                                )}
                               </div>
                             </div>
                           </td>
@@ -354,12 +443,8 @@ const App = () => {
                   ))
                 ) : (
                   <tr>
-                    <td colSpan="7" className="px-6 py-12 text-center text-gray-500">
-                      <div className="flex flex-col items-center justify-center">
-                        <Search size={48} className="text-gray-700 mb-4" />
-                        <p className="text-lg font-medium">No items found</p>
-                        <p className="text-sm">Try adjusting your search terms</p>
-                      </div>
+                    <td colSpan={7} className="px-6 py-12 text-center text-gray-500">
+                      No items found. Click "Scan".
                     </td>
                   </tr>
                 )}
@@ -367,73 +452,12 @@ const App = () => {
             </table>
           </div>
 
-          <div className="bg-[#151619] px-4 py-3 border-t border-gray-800 flex items-center justify-between sm:px-6">
-            <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
-              <div>
-                <p className="text-sm text-gray-500">
-                  Showing <span className="font-medium text-gray-300">1</span> to{" "}
-                  <span className="font-medium text-gray-300">{processedData.length}</span> of{" "}
-                  <span className="font-medium text-gray-300">{items.length}</span> results
-                </p>
-              </div>
-              <div>
-                <nav className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
-                  <button className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-700 bg-[#1a1b1e] text-sm font-medium text-gray-400 hover:bg-[#25262b]">
-                    Previous
-                  </button>
-                  <button className="relative inline-flex items-center px-4 py-2 border border-gray-700 bg-[#25262b] text-sm font-medium text-white">
-                    1
-                  </button>
-                  <button className="relative inline-flex items-center px-4 py-2 border border-gray-700 bg-[#1a1b1e] text-sm font-medium text-gray-400 hover:bg-[#25262b]">
-                    2
-                  </button>
-                  <button className="relative inline-flex items-center px-4 py-2 border border-gray-700 bg-[#1a1b1e] text-sm font-medium text-gray-400 hover:bg-[#25262b]">
-                    3
-                  </button>
-                  <button className="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-700 bg-[#1a1b1e] text-sm font-medium text-gray-400 hover:bg-[#25262b]">
-                    Next
-                  </button>
-                </nav>
-              </div>
-            </div>
+          <div className="px-6 py-4 border-t border-gray-800 text-xs text-gray-500 flex items-center justify-between">
+            <div>Showing {processedData.length} results</div>
+            <div>{lastUpdated ? `Last updated: ${lastUpdated.toLocaleTimeString()}` : ""}</div>
           </div>
-
         </div>
-      </main>
-    </div>
-  );
-};
-
-// Sub-components
-const StatCard = ({ label, value, icon, color }) => (
-  <div className="bg-[#1a1b1e] p-4 rounded-xl border border-gray-800 flex items-center justify-between hover:border-gray-700 transition-colors">
-    <div>
-      <p className="text-gray-500 text-xs font-medium uppercase tracking-wider">{label}</p>
-      <p className={`text-2xl font-bold mt-1 ${color ? color : "text-white"}`}>{value}</p>
-    </div>
-    <div className={`p-3 rounded-lg bg-opacity-10 ${color ? color.replace("text-", "bg-") : "bg-gray-700"} ${color}`}>
-      {icon}
-    </div>
-  </div>
-);
-
-const Th = ({ label, sortKey, onClick, sortConfig, align = "left" }) => {
-  const isActive = sortConfig.key === sortKey;
-
-  return (
-    <th
-      scope="col"
-      className={`px-6 py-4 text-${align} text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-indigo-400 transition-colors select-none group`}
-      onClick={onClick}
-    >
-      <div className={`flex items-center gap-2 ${align === "right" ? "justify-end" : align === "center" ? "justify-center" : "justify-start"}`}>
-        {label}
-        <span className={`transform transition-opacity ${isActive ? "opacity-100" : "opacity-0 group-hover:opacity-50"}`}>
-          <ArrowUpDown size={14} className={isActive && sortConfig.direction === "asc" ? "transform rotate-180" : ""} />
-        </span>
       </div>
-    </th>
+    </div>
   );
-};
-
-export default App;
+}
