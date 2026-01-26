@@ -54,10 +54,21 @@ const BUFF_COOKIE = process.env.BUFF163_COOKIE || "";
 const BUFF_REFERER =
   process.env.BUFF163_REFERER || "https://buff.163.com/market/cs2";
 
-async function buffFetch(path) {
-  const url = BUFF_BASE + path;
+/**
+ * Low-level BUFF fetch with query params + debug logging.
+ * Logs status and first 200 chars of the response body to Netlify logs.
+ */
+async function buffFetch(path, params = {}) {
+  const url = new URL(BUFF_BASE + path);
 
-  const res = await fetch(url, {
+  // Attach query params
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== "") {
+      url.searchParams.set(k, String(v));
+    }
+  }
+
+  const res = await fetch(url.toString(), {
     headers: {
       Cookie: BUFF_COOKIE,
       Referer: BUFF_REFERER,
@@ -69,14 +80,36 @@ async function buffFetch(path) {
     },
   });
 
-  if (!res.ok) {
-    throw new Error(`BUFF HTTP ${res.status} at ${url}`);
+  const text = await res.text();
+
+  // DEBUG: see exactly what BUFF returns
+  console.log("BUFF DEBUG", {
+    url: url.toString(),
+    status: res.status,
+    snippet: text.slice(0, 200),
+  });
+
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    // Not JSON (probably HTML error page)
   }
 
-  const json = await res.json();
-  if (json.code !== "OK") {
-    throw new Error(`BUFF API error at ${url}: ${json.code || "Unknown"}`);
+  // BUFF success is usually either { code: "OK" } or { code: 0 }
+  const code = json && (json.code ?? json.data?.code);
+  const isOkCode = code === "OK" || code === 0;
+
+  if (!res.ok || !isOkCode) {
+    const msg =
+      (json && (json.error || json.msg || json.message)) ||
+      text.slice(0, 120);
+
+    throw new Error(
+      `BUFF HTTP ${res.status}, code=${code ?? "?"}, msg=${msg}`
+    );
   }
+
   return json;
 }
 
@@ -84,13 +117,16 @@ async function buffFetch(path) {
 async function fetchBuffItems(limit, fxCnyUsd) {
   const pageSize = Math.min(Math.max(1, limit), 60);
 
-  // Same style as your old WM scanner, just simplified.
-  const data = await buffFetch(
-    `/api/market/goods?game=cs2&page_num=1&page_size=${pageSize}&sort_by=price.desc`
-  );
+  // Using query params instead of building the string manually
+  const data = await buffFetch("/api/market/goods", {
+    game: "cs2", // or "csgo" if that works better for your BUFF account
+    page_num: 1,
+    page_size: pageSize,
+    sort_by: "price.desc",
+  });
 
-  const goodsInfos = data.data.goods_infos || {};
-  const items = data.data.items || [];
+  const goodsInfos = data.data?.goods_infos || {};
+  const items = data.data?.items || [];
 
   return items.slice(0, limit).map((row, idx) => {
     const goods = goodsInfos[row.goods_id] || {};
@@ -190,8 +226,7 @@ async function mcsgoBestSell(hashName) {
 
     // examples show `price` field on each entry
     const best = list.reduce(
-      (min, item) =>
-        Number(item.price) < Number(min.price) ? item : min,
+      (min, item) => (Number(item.price) < Number(min.price) ? item : min),
       list[0]
     );
 
