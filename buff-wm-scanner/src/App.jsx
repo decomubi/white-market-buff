@@ -1,463 +1,516 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { Search, ArrowUpDown, TrendingUp, DollarSign, Box, RefreshCw, Filter, ExternalLink } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from "react";
+import {
+  Search,
+  ArrowUpDown,
+  TrendingUp,
+  Box,
+  RefreshCw,
+  Filter,
+  ExternalLink,
+} from "lucide-react";
 
-export default function App() {
+const App = () => {
   const [items, setItems] = useState([]);
-  const [detailsOpen, setDetailsOpen] = useState({});
-  const [detailsById, setDetailsById] = useState({});
-  const [detailsLoading, setDetailsLoading] = useState({});
-  const [isLoading, setIsLoading] = useState(false);
+  const [fx, setFx] = useState(0.14);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [limit, setLimit] = useState(10);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const [lastUpdated, setLastUpdated] = useState(null);
-  const [fxRate, setFxRate] = useState(0.14);
+  const [sortConfig, setSortConfig] = useState({
+    key: "netProfitUsd",
+    direction: "desc",
+  });
+  const [onlyProfitable, setOnlyProfitable] = useState(false);
 
-  const [scanLimit, setScanLimit] = useState(30);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [showOnlyProfitable, setShowOnlyProfitable] = useState(false);
-  const [hideZeroBuyOffers, setHideZeroBuyOffers] = useState(false);
-
-  const [sortConfig, setSortConfig] = useState({ key: 'spread', direction: 'desc' });
-
-  const [isFiltersOpen, setIsFiltersOpen] = useState(false);
-  const [minSpread, setMinSpread] = useState(5);
-  const [minProfit, setMinProfit] = useState(1);
-  const [maxBuffPrice, setMaxBuffPrice] = useState(999999);
-
+  // ---------- FETCH FROM NETLIFY FUNCTION ----------
   const fetchData = async () => {
-    setIsLoading(true);
+    setLoading(true);
+    setError("");
+
     try {
-      const res = await fetch(`/.netlify/functions/scan?limit=${encodeURIComponent(scanLimit)}`);
-      const data = await res.json();
-      if (data?.ok) {
-        setItems(data.items || []);
-        setFxRate(data.fx || 0.14);
-        setLastUpdated(new Date());
-      } else {
-        console.error(data?.error || 'Scan failed');
-        setItems([]);
+      const res = await fetch(`/.netlify/functions/scan?limit=${limit}`);
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status} from scan function`);
       }
+
+      const data = await res.json();
+
+      if (!data.ok) {
+        throw new Error(data.error || "Scan failed");
+      }
+
+      setItems(Array.isArray(data.items) ? data.items : []);
+      if (typeof data.fx === "number") setFx(data.fx);
+
+      setLastUpdated(new Date());
     } catch (err) {
-      console.error(err);
+      console.error("Scan error:", err);
+      setError(err.message || "Unknown error");
       setItems([]);
     } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const fetchDetails = async (item) => {
-    try {
-      setDetailsLoading((p) => ({ ...p, [item.id]: true }));
-      const url = `/.netlify/functions/scan?goods_id=${encodeURIComponent(item.id)}&hash_name=${encodeURIComponent(item.name)}`;
-      const res = await fetch(url);
-      const data = await res.json();
-      if (data?.ok) {
-        setDetailsById((p) => ({ ...p, [item.id]: data }));
-      } else {
-        setDetailsById((p) => ({ ...p, [item.id]: { ok: false, error: data?.error || "Failed to load details" } }));
-      }
-    } catch (e) {
-      setDetailsById((p) => ({ ...p, [item.id]: { ok: false, error: e?.message || String(e) } }));
-    } finally {
-      setDetailsLoading((p) => ({ ...p, [item.id]: false }));
-    }
-  };
-
-  const toggleDetails = (item) => {
-    setDetailsOpen((p) => {
-      const next = { ...p, [item.id]: !p[item.id] };
-      return next;
-    });
-    const willOpen = !detailsOpen[item.id];
-    if (willOpen && !detailsById[item.id] && !detailsLoading[item.id]) {
-      fetchDetails(item);
+      setLoading(false);
     }
   };
 
   useEffect(() => {
+    // Optional: auto-scan on page load
     fetchData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const processedData = useMemo(() => {
-    const processed = items.map(item => {
-      const buffUsd = (Number(item.buffPrice || 0) * (Number(item.fx || fxRate) || fxRate));
-      const mcBuy = Number(item.wmPrice || 0);
+  // ---------- METRICS ----------
+  const profitableItems = useMemo(
+    () => items.filter((i) => Number(i.netProfitUsd) > 0),
+    [items]
+  );
 
-      const spread = buffUsd > 0 ? ((mcBuy - buffUsd) / buffUsd) * 100 : 0;
-      const netProfit = mcBuy - buffUsd;
+  const profitableFlips = profitableItems.length;
 
-      return {
-        ...item,
-        buffUsd,
-        mcBuy,
-        spread,
-        netProfit
-      };
-    });
-
-    let filtered = processed.filter(item =>
-      item.name.toLowerCase().includes(searchTerm.toLowerCase())
+  const avgSpread = useMemo(() => {
+    if (!items.length) return 0;
+    const sum = items.reduce(
+      (acc, item) => acc + (Number(item.spreadPct) || 0),
+      0
     );
+    return sum / items.length;
+  }, [items]);
 
-    if (hideZeroBuyOffers) filtered = filtered.filter(item => item.mcBuy > 0);
-    if (showOnlyProfitable) filtered = filtered.filter(item => item.netProfit > 0);
-
-    filtered = filtered.filter(item =>
-      item.spread >= minSpread &&
-      item.netProfit >= minProfit &&
-      item.buffUsd <= maxBuffPrice
+  const totalVolumeUsd = useMemo(() => {
+    return items.reduce(
+      (acc, item) => acc + (Number(item.buffUsd) || 0),
+      0
     );
+  }, [items]);
+
+  // ---------- SORT + FILTER ----------
+  const sortedAndFilteredItems = useMemo(() => {
+    let result = [...items];
+
+    if (searchTerm.trim()) {
+      const q = searchTerm.toLowerCase();
+      result = result.filter((item) =>
+        (item.name || "").toLowerCase().includes(q)
+      );
+    }
+
+    if (onlyProfitable) {
+      result = result.filter((i) => Number(i.netProfitUsd) > 0);
+    }
 
     if (sortConfig.key) {
-      filtered.sort((a, b) => {
-        const aVal = a[sortConfig.key];
-        const bVal = b[sortConfig.key];
-        if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
-        if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
-        return 0;
+      const { key, direction } = sortConfig;
+      result.sort((a, b) => {
+        const av = a[key] ?? 0;
+        const bv = b[key] ?? 0;
+        if (typeof av === "string" && typeof bv === "string") {
+          return direction === "asc"
+            ? av.localeCompare(bv)
+            : bv.localeCompare(av);
+        }
+        const na = Number(av) || 0;
+        const nb = Number(bv) || 0;
+        return direction === "asc" ? na - nb : nb - na;
       });
     }
 
-    return filtered;
-  }, [items, searchTerm, showOnlyProfitable, hideZeroBuyOffers, sortConfig, minSpread, minProfit, maxBuffPrice, fxRate]);
+    return result;
+  }, [items, searchTerm, sortConfig, onlyProfitable]);
 
-  const stats = useMemo(() => {
-    const profitable = processedData.filter(item => item.netProfit > 0).length;
-    const avgSpread = processedData.length > 0
-      ? processedData.reduce((sum, item) => sum + item.spread, 0) / processedData.length
-      : 0;
-    const totalVolume = processedData.reduce((sum, item) => sum + (Number(item.quantity || 0)), 0);
-    return { profitable, avgSpread, totalVolume };
-  }, [processedData]);
-
-  const requestSort = (key) => {
-    let direction = 'desc';
-    if (sortConfig.key === key && sortConfig.direction === 'desc') direction = 'asc';
-    setSortConfig({ key, direction });
+  const handleSort = (key) => {
+    setSortConfig((prev) => {
+      if (prev.key === key) {
+        return {
+          key,
+          direction: prev.direction === "asc" ? "desc" : "asc",
+        };
+      }
+      return { key, direction: "desc" };
+    });
   };
 
+  const formatUsd = (value) =>
+    typeof value === "number"
+      ? `$${value.toFixed(2)}`
+      : value
+      ? `$${Number(value).toFixed(2)}`
+      : "$0.00";
+
+  const formatPct = (value) =>
+    typeof value === "number"
+      ? `${value.toFixed(2)}%`
+      : value
+      ? `${Number(value).toFixed(2)}%`
+      : "0.00%";
+
   return (
-    <div className="min-h-screen bg-[#0b0e14] text-gray-100">
-      <div className="max-w-6xl mx-auto p-6">
-        <div className="flex items-center justify-between mb-6">
+    <div className="min-h-screen bg-slate-950 text-slate-100">
+      <div className="max-w-7xl mx-auto px-4 py-6">
+        {/* HEADER */}
+        <header className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500/40 to-purple-500/30 flex items-center justify-center border border-indigo-500/20">
-              <TrendingUp className="w-5 h-5 text-indigo-200" />
+            <div className="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center shadow-lg shadow-indigo-600/40">
+              <TrendingUp size={18} />
             </div>
             <div>
-              <div className="text-xl font-bold tracking-tight">ArbitrageScanner</div>
-              <div className="text-sm text-gray-400">Buff163 to MarketCSGO</div>
+              <h1 className="text-lg font-semibold tracking-tight">
+                ArbitrageScanner
+              </h1>
+              <p className="text-xs text-slate-400">
+                Buff163 to MarketCSGO
+              </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-3 text-sm text-gray-300">
+          <div className="flex items-center gap-4 text-xs text-slate-400">
             <div className="flex items-center gap-2">
-              <span className="inline-block w-2 h-2 rounded-full bg-green-500" />
-              Buff163 API: Server-side
+              <span className="h-2 w-2 rounded-full bg-emerald-500" />
+              <span>Buff163 API: Server-side</span>
             </div>
             <div className="flex items-center gap-2">
-              <span className="inline-block w-2 h-2 rounded-full bg-green-500" />
-              MarketCSGO API: Server-side
+              <span className="h-2 w-2 rounded-full bg-emerald-500" />
+              <span>MarketCSGO API: Server-side</span>
             </div>
           </div>
-        </div>
+        </header>
 
+        {/* METRIC CARDS */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-          <div className="rounded-2xl bg-[#121318] border border-gray-800 p-4">
-            <div className="text-xs text-gray-400 mb-2">PROFITABLE FLIPS</div>
-            <div className="flex items-center justify-between">
-              <div className="text-2xl font-bold text-green-400">{stats.profitable}</div>
-              <div className="w-10 h-10 rounded-xl bg-green-500/10 flex items-center justify-center border border-green-500/20">
-                <TrendingUp className="w-5 h-5 text-green-300" />
-              </div>
-            </div>
-          </div>
-
-          <div className="rounded-2xl bg-[#121318] border border-gray-800 p-4">
-            <div className="text-xs text-gray-400 mb-2">AVG. SPREAD</div>
-            <div className="flex items-center justify-between">
-              <div className={`text-2xl font-bold ${stats.avgSpread > 0 ? 'text-green-400' : 'text-red-400'}`}>
-                {stats.avgSpread.toFixed(2)}%
-              </div>
-              <div className="w-10 h-10 rounded-xl bg-blue-500/10 flex items-center justify-center border border-blue-500/20">
-                <ArrowUpDown className="w-5 h-5 text-blue-300" />
-              </div>
-            </div>
-          </div>
-
-          <div className="rounded-2xl bg-[#121318] border border-gray-800 p-4">
-            <div className="text-xs text-gray-400 mb-2">TOTAL VOLUME</div>
-            <div className="flex items-center justify-between">
-              <div className="text-2xl font-bold text-indigo-300">{stats.totalVolume}</div>
-              <div className="w-10 h-10 rounded-xl bg-indigo-500/10 flex items-center justify-center border border-indigo-500/20">
-                <Box className="w-5 h-5 text-indigo-300" />
-              </div>
-            </div>
-          </div>
-
-          <div className="rounded-2xl bg-[#121318] border border-gray-800 p-4">
-            <div className="text-xs text-gray-400 mb-2">DATA STATUS</div>
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-lg font-bold">Up to Date</div>
-                <div className="text-xs text-gray-500">FX CNY→USD: {fxRate}</div>
-              </div>
-              <button
-                onClick={fetchData}
-                disabled={isLoading}
-                className="w-10 h-10 rounded-xl bg-purple-500/10 flex items-center justify-center border border-purple-500/20 hover:bg-purple-500/20 transition-colors disabled:opacity-50"
-              >
-                <RefreshCw className={`w-5 h-5 text-purple-300 ${isLoading ? 'animate-spin' : ''}`} />
-              </button>
-            </div>
-          </div>
+          <MetricCard
+            title="Profitable flips"
+            value={profitableFlips}
+            icon={TrendingUp}
+            accent="emerald"
+          />
+          <MetricCard
+            title="Avg. spread"
+            value={formatPct(avgSpread)}
+            icon={ArrowUpDown}
+            accent={avgSpread >= 0 ? "emerald" : "red"}
+          />
+          <MetricCard
+            title="Total volume"
+            value={formatUsd(totalVolumeUsd)}
+            icon={Box}
+            accent="indigo"
+          />
+          <MetricCard
+            title="Data status"
+            value="Up to Date"
+            sub={`FX CNY→USD: ${fx.toFixed(2)}`}
+            icon={RefreshCw}
+            accent="violet"
+          />
         </div>
 
-        <div className="flex flex-col md:flex-row gap-4 mb-6">
-          <div className="relative flex-1">
-            <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-500" />
+        {/* SEARCH + CONTROLS */}
+        <div className="flex flex-col md:flex-row gap-3 items-center mb-4">
+          <div className="flex-1 w-full relative">
+            <Search
+              size={16}
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500"
+            />
             <input
+              type="text"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               placeholder="Search skin name (e.g. Redline)..."
-              className="w-full bg-[#121318] border border-gray-800 rounded-2xl pl-11 pr-4 py-3 text-sm outline-none focus:border-indigo-500/40"
+              className="w-full bg-slate-900/70 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-slate-500"
             />
           </div>
 
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => setIsFiltersOpen(!isFiltersOpen)}
-              className="flex items-center gap-2 bg-[#121318] border border-gray-800 rounded-2xl px-4 py-3 text-sm hover:border-gray-700 transition-colors"
-            >
-              <Filter className="w-4 h-4" />
-              Advanced Filters
-            </button>
+          <button
+            type="button"
+            className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900/70 border border-slate-800 text-xs text-slate-300 hover:border-indigo-500 hover:text-indigo-300 transition-colors"
+            onClick={() => setOnlyProfitable((v) => !v)}
+          >
+            <Filter size={14} />
+            {onlyProfitable ? "Only profitable ✓" : "Only profitable"}
+          </button>
 
+          <div className="flex items-center gap-2">
             <input
               type="number"
-              value={scanLimit}
-              onChange={(e) => setScanLimit(Number(e.target.value))}
-              className="w-20 bg-[#121318] border border-gray-800 rounded-2xl px-4 py-3 text-sm outline-none focus:border-indigo-500/40 text-center"
               min={1}
-              max={60}
+              max={100}
+              value={limit}
+              onChange={(e) =>
+                setLimit(Math.max(1, Math.min(100, Number(e.target.value) || 1)))
+              }
+              className="w-16 bg-slate-900/70 border border-slate-800 rounded-xl px-2 py-2 text-xs text-center focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
             />
-
             <button
               onClick={fetchData}
-              disabled={isLoading}
-              className="bg-indigo-600 hover:bg-indigo-700 rounded-2xl px-6 py-3 text-sm font-medium transition-colors disabled:opacity-50"
+              disabled={loading}
+              className="px-4 py-2 text-xs rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-900 disabled:text-slate-400 font-medium flex items-center gap-2 shadow-lg shadow-indigo-600/40 transition-colors"
             >
-              {isLoading ? 'Scanning...' : 'Scan'}
+              {loading ? (
+                <>
+                  <RefreshCw size={14} className="animate-spin" /> Scanning…
+                </>
+              ) : (
+                "Scan"
+              )}
             </button>
           </div>
         </div>
 
-        {isFiltersOpen && (
-          <div className="rounded-2xl bg-[#121318] border border-gray-800 p-6 mb-6">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
-              <div>
-                <label className="block text-sm font-medium mb-2">Min Spread (%)</label>
-                <input
-                  type="number"
-                  value={minSpread}
-                  onChange={(e) => setMinSpread(Number(e.target.value))}
-                  className="w-full bg-[#0b0e14] border border-gray-800 rounded-xl px-4 py-2 text-sm outline-none focus:border-indigo-500/40"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-2">Min Profit ($)</label>
-                <input
-                  type="number"
-                  value={minProfit}
-                  onChange={(e) => setMinProfit(Number(e.target.value))}
-                  className="w-full bg-[#0b0e14] border border-gray-800 rounded-xl px-4 py-2 text-sm outline-none focus:border-indigo-500/40"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-2">Max BUFF Price ($)</label>
-                <input
-                  type="number"
-                  value={maxBuffPrice}
-                  onChange={(e) => setMaxBuffPrice(Number(e.target.value))}
-                  className="w-full bg-[#0b0e14] border border-gray-800 rounded-xl px-4 py-2 text-sm outline-none focus:border-indigo-500/40"
-                />
-              </div>
-            </div>
-
-            <div className="flex flex-col md:flex-row gap-4">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={hideZeroBuyOffers}
-                  onChange={(e) => setHideZeroBuyOffers(e.target.checked)}
-                  className="rounded"
-                />
-                <span className="text-sm">Hide $0 buy offers</span>
-              </label>
-
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={showOnlyProfitable}
-                  onChange={(e) => setShowOnlyProfitable(e.target.checked)}
-                  className="rounded"
-                />
-                <span className="text-sm">Only profitable</span>
-              </label>
-            </div>
+        {/* ERROR BANNER */}
+        {error && (
+          <div className="mb-4 rounded-xl border border-red-500/40 bg-red-500/10 text-xs text-red-300 px-4 py-2">
+            Scan failed: {error}
           </div>
         )}
 
-        <div className="rounded-2xl bg-[#121318] border border-gray-800 overflow-hidden">
+        {/* TABLE */}
+        <div className="bg-slate-900/60 border border-slate-800/80 rounded-2xl overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead className="bg-[#0f1016] border-b border-gray-800">
+            <table className="min-w-full text-xs">
+              <thead className="bg-slate-900/80 border-b border-slate-800/80">
                 <tr>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-gray-400 uppercase">Item Details</th>
-                  <th onClick={() => requestSort('buffUsd')} className="px-6 py-4 text-right text-xs font-medium text-gray-400 uppercase cursor-pointer">BUFF163 Price</th>
-                  <th onClick={() => requestSort('mcBuy')} className="px-6 py-4 text-right text-xs font-medium text-gray-400 uppercase cursor-pointer">MCSGO Buy Order</th>
-                  <th onClick={() => requestSort('spread')} className="px-6 py-4 text-right text-xs font-medium text-gray-400 uppercase cursor-pointer">Spread</th>
-                  <th onClick={() => requestSort('netProfit')} className="px-6 py-4 text-right text-xs font-medium text-gray-400 uppercase cursor-pointer">Net Profit</th>
-                  <th className="px-6 py-4 text-right text-xs font-medium text-gray-400 uppercase">Quantity</th>
-                  <th className="px-6 py-4 text-right text-xs font-medium text-gray-400 uppercase">Actions</th>
+                  <th className="px-4 py-3 text-left font-medium text-slate-400 text-[11px]">
+                    Item details
+                  </th>
+                  <SortableHeader
+                    label="BUFF163 price"
+                    sortKey="buffUsd"
+                    sortConfig={sortConfig}
+                    onSort={handleSort}
+                    align="right"
+                  />
+                  <SortableHeader
+                    label="MCSGO buy order"
+                    sortKey="mcsgPrice"
+                    sortConfig={sortConfig}
+                    onSort={handleSort}
+                    align="right"
+                  />
+                  <SortableHeader
+                    label="Spread"
+                    sortKey="spreadPct"
+                    sortConfig={sortConfig}
+                    onSort={handleSort}
+                    align="right"
+                  />
+                  <SortableHeader
+                    label="Net profit"
+                    sortKey="netProfitUsd"
+                    sortConfig={sortConfig}
+                    onSort={handleSort}
+                    align="right"
+                  />
+                  <SortableHeader
+                    label="Quantity"
+                    sortKey="quantity"
+                    sortConfig={sortConfig}
+                    onSort={handleSort}
+                    align="center"
+                  />
+                  <th className="px-4 py-3 text-center font-medium text-slate-400 text-[11px]">
+                    Actions
+                  </th>
                 </tr>
               </thead>
-
-              <tbody className="divide-y divide-gray-800">
-                {processedData.length > 0 ? (
-                  processedData.map((item) => (
-                    <React.Fragment key={item.id}>
-                      <tr className="hover:bg-[#151720] transition-colors">
-                        <td className="px-6 py-4">
-                          <div className="flex items-center gap-4">
-                            <div className="w-12 h-12 rounded-xl bg-[#0b0e14] border border-gray-800 flex items-center justify-center overflow-hidden">
-                              {item.image ? (
-                                <img src={item.image} alt={item.name} className="w-full h-full object-contain" />
-                              ) : null}
-                            </div>
-                            <div>
-                              <div className="font-medium text-sm">{item.name}</div>
-                              {item.wmErr ? (
-                                <div className="text-xs text-amber-400 mt-1">API: {item.wmErr}</div>
-                              ) : null}
-                            </div>
-                          </div>
-                        </td>
-
-                        <td className="px-6 py-4 text-right">
-                          <div className="text-sm font-medium">¥ {Number(item.buffPrice || 0).toFixed(2)}</div>
-                          <div className="text-xs text-gray-500">$ {Number(item.buffUsd || 0).toFixed(2)} (FX)</div>
-                        </td>
-
-                        <td className="px-6 py-4 text-right">
-                          <div className="text-sm font-medium">$ {Number(item.mcBuy || 0).toFixed(2)}</div>
-                          <div className="text-xs text-gray-500">{item.wmBuyQty || 0} orders</div>
-                        </td>
-
-                        <td className="px-6 py-4 text-right">
-                          <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${item.spread > 0 ? 'bg-green-500/10 text-green-300 border border-green-500/20' : 'bg-red-500/10 text-red-300 border border-red-500/20'}`}>
-                            {item.spread.toFixed(2)}%
-                          </span>
-                        </td>
-
-                        <td className="px-6 py-4 text-right">
-                          <div className={`text-sm font-medium ${item.netProfit > 0 ? 'text-green-400' : 'text-red-400'}`}>
-                            ${item.netProfit.toFixed(2)}
-                          </div>
-                        </td>
-
-                        <td className="px-6 py-4 text-right">
-                          <div className="text-sm font-medium">{item.quantity}</div>
-                          <div className="w-20 h-1.5 bg-gray-800 rounded-full ml-auto mt-2">
-                            <div className="h-full bg-indigo-500 rounded-full" style={{ width: `${Math.min(100, (item.quantity / 1500) * 100)}%` }} />
-                          </div>
-                        </td>
-
-                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                          <button
-                            onClick={() => toggleDetails(item)}
-                            className="inline-flex items-center px-3 py-1.5 mr-2 rounded-lg bg-[#2a2d35] hover:bg-[#343845] text-gray-200 transition-colors text-xs"
-                          >
-                            Details
-                          </button>
-
-                          <a
-                            href={item.wmUrl || `https://market.csgo.com/en/?search=${encodeURIComponent(item.name)}`}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center justify-center w-9 h-9 rounded-xl bg-indigo-500/10 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors"
-                          >
-                            <ExternalLink className="w-4 h-4 text-indigo-300" />
-                          </a>
-                        </td>
-                      </tr>
-
-                      {detailsOpen[item.id] && (
-                        <tr className="bg-[#16181d]">
-                          <td colSpan={7} className="px-6 py-4">
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                              <div className="rounded-xl border border-gray-800 bg-[#121318] p-4">
-                                <div className="text-sm font-semibold text-gray-100 mb-2">BUFF lowest 5 listings</div>
-                                {detailsLoading[item.id] && !detailsById[item.id] ? (
-                                  <div className="text-sm text-gray-400">Loading…</div>
-                                ) : detailsById[item.id]?.ok ? (
-                                  <div className="space-y-2">
-                                    {(detailsById[item.id]?.buff?.listings || []).map((l, idx) => (
-                                      <div key={idx} className="flex items-center justify-between text-sm">
-                                        <div className="text-gray-300">#{idx + 1}</div>
-                                        <div className="text-gray-200">¥ {Number(l.priceCny).toFixed(2)}</div>
-                                        <div className="text-gray-400">float: {l.float ?? "—"}</div>
-                                      </div>
-                                    ))}
-                                  </div>
-                                ) : (
-                                  <div className="text-sm text-amber-400">{detailsById[item.id]?.error || "Click Details to load"}</div>
-                                )}
-                              </div>
-
-                              <div className="rounded-xl border border-gray-800 bg-[#121318] p-4">
-                                <div className="text-sm font-semibold text-gray-100 mb-2">MarketCSGO</div>
-                                {detailsById[item.id]?.ok ? (
-                                  <div className="space-y-2 text-sm">
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-gray-400">Best buy order</span>
-                                      <span className="text-gray-200">$ {Number(detailsById[item.id]?.mc?.bestBuy || 0).toFixed(2)}</span>
-                                    </div>
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-gray-400">Buy order qty</span>
-                                      <span className="text-gray-200">{detailsById[item.id]?.mc?.bestBuyQty || 0}</span>
-                                    </div>
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-gray-400">Best sell</span>
-                                      <span className="text-gray-200">$ {Number(detailsById[item.id]?.mc?.bestSell || 0).toFixed(2)}</span>
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <div className="text-sm text-amber-400">{detailsById[item.id]?.error || "No details yet"}</div>
-                                )}
-                              </div>
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </React.Fragment>
-                  ))
-                ) : (
+              <tbody>
+                {!loading && sortedAndFilteredItems.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="px-6 py-12 text-center text-gray-500">
-                      No items found. Click "Scan".
+                    <td
+                      colSpan={7}
+                      className="px-4 py-10 text-center text-slate-500 text-xs"
+                    >
+                      No items found. Click &quot;Scan&quot;.
                     </td>
                   </tr>
                 )}
+
+                {sortedAndFilteredItems.map((item) => {
+                  const profit = Number(item.netProfitUsd) || 0;
+                  const spread = Number(item.spreadPct) || 0;
+                  const spreadColor =
+                    spread > 0
+                      ? "text-emerald-400 bg-emerald-500/10"
+                      : "text-red-400 bg-red-500/10";
+
+                  return (
+                    <tr
+                      key={item.id}
+                      className="border-t border-slate-800/60 hover:bg-slate-900/60 transition-colors"
+                    >
+                      {/* ITEM DETAILS */}
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-lg bg-slate-800/80 overflow-hidden flex items-center justify-center">
+                            {item.image ? (
+                              <img
+                                src={item.image}
+                                alt={item.name}
+                                className="w-full h-full object-cover"
+                              />
+                            ) : (
+                              <Box size={16} className="text-slate-500" />
+                            )}
+                          </div>
+                          <div className="flex flex-col">
+                            <span className="text-[11px] font-medium">
+                              {item.name}
+                            </span>
+                            <span className="text-[10px] text-slate-500">
+                              {item.wear || "-"}
+                            </span>
+                            {item.note && (
+                              <span className="text-[10px] text-amber-400/80 mt-0.5">
+                                API: {item.note}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+
+                      {/* BUFF PRICE */}
+                      <td className="px-4 py-3 text-right text-[11px]">
+                        <div className="flex flex-col items-end">
+                          <span>{item.buffPrice ?? "-"}</span>
+                          <span className="text-slate-500">
+                            {formatUsd(item.buffUsd)}
+                          </span>
+                        </div>
+                      </td>
+
+                      {/* MCSGO PRICE */}
+                      <td className="px-4 py-3 text-right text-[11px]">
+                        <div className="flex flex-col items-end">
+                          <span>{formatUsd(item.mcsgPrice)}</span>
+                          <span className="text-slate-500">
+                            {item.mcsgOrders || 0} orders
+                          </span>
+                        </div>
+                      </td>
+
+                      {/* SPREAD */}
+                      <td className="px-4 py-3 text-right text-[11px]">
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded-full ${spreadColor}`}
+                        >
+                          {formatPct(spread)}
+                        </span>
+                      </td>
+
+                      {/* NET PROFIT */}
+                      <td className="px-4 py-3 text-right text-[11px]">
+                        <span
+                          className={
+                            profit > 0 ? "text-emerald-400" : "text-red-400"
+                          }
+                        >
+                          {formatUsd(profit)}
+                        </span>
+                      </td>
+
+                      {/* QUANTITY */}
+                      <td className="px-4 py-3 text-center text-[11px]">
+                        {item.quantity ?? "-"}
+                      </td>
+
+                      {/* ACTIONS */}
+                      <td className="px-4 py-3 text-center text-[11px]">
+                        {item.mcsgUrl ? (
+                          <a
+                            href={item.mcsgUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-slate-900/80 border border-slate-700 hover:border-indigo-500 hover:text-indigo-400 transition-colors"
+                          >
+                            <ExternalLink size={14} />
+                          </a>
+                        ) : (
+                          <span className="text-slate-600 text-[10px]">
+                            —
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
 
-          <div className="px-6 py-4 border-t border-gray-800 text-xs text-gray-500 flex items-center justify-between">
-            <div>Showing {processedData.length} results</div>
-            <div>{lastUpdated ? `Last updated: ${lastUpdated.toLocaleTimeString()}` : ""}</div>
+          <div className="px-4 py-2 border-t border-slate-800/80 text-[10px] text-slate-500 flex items-center justify-between">
+            <span>
+              Showing {sortedAndFilteredItems.length} results
+            </span>
+            <span>
+              Last updated:{" "}
+              {lastUpdated
+                ? lastUpdated.toLocaleTimeString()
+                : "—"}
+            </span>
           </div>
         </div>
       </div>
     </div>
   );
-}
+};
+
+// ---------- SMALL COMPONENTS ----------
+
+const MetricCard = ({ title, value, sub, icon: Icon, accent = "indigo" }) => {
+  const colorMap = {
+    indigo: "text-indigo-400 bg-indigo-500/10",
+    emerald: "text-emerald-400 bg-emerald-500/10",
+    violet: "text-violet-400 bg-violet-500/10",
+    red: "text-red-400 bg-red-500/10",
+  };
+
+  return (
+    <div className="bg-slate-900/60 border border-slate-800/80 rounded-2xl px-4 py-3 flex items-center justify-between">
+      <div>
+        <p className="text-[10px] text-slate-400 uppercase tracking-wide mb-1">
+          {title}
+        </p>
+        <p className="text-sm font-semibold">{value}</p>
+        {sub && (
+          <p className="text-[10px] text-slate-500 mt-1">
+            {sub}
+          </p>
+        )}
+      </div>
+      <div
+        className={`w-9 h-9 rounded-xl flex items-center justify-center ${colorMap[accent]}`}
+      >
+        <Icon size={16} />
+      </div>
+    </div>
+  );
+};
+
+const SortableHeader = ({ label, sortKey, sortConfig, onSort, align }) => {
+  const isActive = sortConfig.key === sortKey;
+  const justify =
+    align === "right"
+      ? "justify-end"
+      : align === "center"
+      ? "justify-center"
+      : "justify-start";
+
+  return (
+    <th
+      className={`px-4 py-3 text-${align} text-[11px] font-medium text-slate-400 select-none`}
+      onClick={() => onSort(sortKey)}
+    >
+      <div className={`flex items-center gap-2 cursor-pointer ${justify}`}>
+        <span>{label}</span>
+        <ArrowUpDown
+          size={14}
+          className={
+            isActive && sortConfig.direction === "asc"
+              ? "transform rotate-180"
+              : ""
+          }
+        />
+      </div>
+    </th>
+  );
+};
+
+export default App;
