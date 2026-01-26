@@ -1,262 +1,439 @@
-// src/App.jsx
-import React, { useMemo, useState } from "react";
+import React, { useState, useMemo, useEffect } from "react";
+import {
+  Search, ArrowUpDown, TrendingUp, DollarSign, Box, RefreshCw, Filter, ExternalLink
+} from "lucide-react";
 
-export default function App() {
-  const [limit, setLimit] = useState(30);
+// Mock data placeholder (the real data comes from Netlify function)
+const MOCK_DATA = [];
+
+const App = () => {
+  const [items, setItems] = useState(MOCK_DATA);
+  const [expandedId, setExpandedId] = useState(null);
+  const [fx, setFx] = useState(0.14);
   const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState("");
-  const [items, setItems] = useState([]);
+  const [error, setError] = useState("");
+  const [query, setQuery] = useState("");
+  const [sortConfig, setSortConfig] = useState({ key: "profitPct", direction: "desc" });
+  const [limit, setLimit] = useState(30);
 
-  const fx = useMemo(() => items?.[0]?.fx ?? 0.14, [items]);
-
-  const rows = useMemo(() => {
-    // Compute simple spread using FX (CNY -> USD)
-    // spread% = (wmPrice - buffUsd) / buffUsd
-    return (items || []).map((it) => {
-      const buffUsd = (Number(it.buffPrice) || 0) * (Number(it.fx) || fx || 0.14);
-      const wmUsd = Number(it.wmPrice) || 0;
-      const spread = buffUsd > 0 ? ((wmUsd - buffUsd) / buffUsd) * 100 : 0;
-      const net = wmUsd - buffUsd;
-      return { ...it, buffUsd, wmUsd, spread, net };
-    });
-  }, [items, fx]);
-
-  async function runScan() {
+  // Fetch data from Netlify Function
+  const fetchData = async () => {
     setLoading(true);
-    setErr("");
+    setExpandedId(null);
+    setError("");
     try {
-      const res = await fetch(`/.netlify/functions/scan?limit=${encodeURIComponent(limit)}`);
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error || "Scan failed");
-      setItems(data.items || []);
+      const res = await fetch(`/.netlify/functions/scan?limit=${limit}`);
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error || "Scan failed");
+      setItems(json.items || []);
+      setFx(json.fx || fx);
     } catch (e) {
-      setItems([]);
-      setErr(String(e?.message || e));
-      alert(`Scan failed: ${String(e?.message || e)}`);
+      setError(String(e.message || e));
     } finally {
       setLoading(false);
     }
-  }
+  };
+
+  useEffect(() => {
+    // optional: auto load once
+    // fetchData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Compute metrics + filtering + sorting
+  const processedData = useMemo(() => {
+    const q = query.trim().toLowerCase();
+
+    const filtered = items.filter((item) => {
+      if (!q) return true;
+      return (item.name || "").toLowerCase().includes(q);
+    });
+
+    const mapped = filtered.map((item) => {
+      // BUFF is CNY, MarketCSGO buy order is USD
+      const buffCny = Number(item.buffPrice || 0);
+      const wmUsd = Number(item.wmPrice || 0);
+
+      const buffUsd = buffCny * fx;
+
+      const net = wmUsd - buffUsd;
+      const profitPct = buffUsd > 0 ? (net / buffUsd) * 100 : -100;
+      const spread = profitPct;
+
+      return {
+        ...item,
+        buffUsd,
+        net,
+        profitPct,
+        spread,
+      };
+    });
+
+    const sorted = [...mapped].sort((a, b) => {
+      const { key, direction } = sortConfig;
+      const av = a[key] ?? 0;
+      const bv = b[key] ?? 0;
+      const cmp = av > bv ? 1 : av < bv ? -1 : 0;
+      return direction === "asc" ? cmp : -cmp;
+    });
+
+    return sorted;
+  }, [items, fx, query, sortConfig]);
+
+  const stats = useMemo(() => {
+    const profitable = processedData.filter((x) => x.net > 0);
+    const avgSpread =
+      processedData.length > 0
+        ? processedData.reduce((sum, x) => sum + (x.spread || 0), 0) / processedData.length
+        : 0;
+
+    const totalVolume = processedData.reduce((sum, x) => sum + Number(x.quantity || 0), 0);
+
+    return {
+      profitableCount: profitable.length,
+      avgSpread,
+      totalVolume,
+    };
+  }, [processedData]);
+
+  const requestSort = (key) => {
+    setSortConfig((prev) => {
+      if (prev.key === key) {
+        return { key, direction: prev.direction === "asc" ? "desc" : "asc" };
+      }
+      return { key, direction: "desc" };
+    });
+  };
 
   return (
-    <div style={styles.page}>
-      <div style={styles.header}>
-        <div>
-          <div style={styles.title}>ArbitrageScanner</div>
-          <div style={styles.subTitle}>Buff163 → WhiteMarket (Buy offers)</div>
-        </div>
+    <div className="min-h-screen bg-[#0b0c10] text-white">
+      <header className="sticky top-0 z-10 bg-[#0b0c10]/90 backdrop-blur border-b border-gray-800">
+        <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-bold tracking-tight flex items-center gap-2">
+              <span className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600/20 text-indigo-400">
+                <TrendingUp size={18} />
+              </span>
+              ArbitrageScanner
+            </h1>
+            <p className="text-xs text-gray-400 mt-1">Buff163 to MarketCSGO</p>
+          </div>
 
-        <div style={styles.controls}>
-          <input
-            style={styles.input}
-            type="number"
-            min={1}
-            max={100}
-            value={limit}
-            onChange={(e) => setLimit(Number(e.target.value))}
-          />
-          <button style={styles.btn} onClick={runScan} disabled={loading}>
-            {loading ? "Scanning..." : "Scan"}
-          </button>
-        </div>
-      </div>
-
-      <div style={styles.metaRow}>
-        <div style={styles.card}>
-          <div style={styles.cardLabel}>FX CNY→USD</div>
-          <div style={styles.cardValue}>{Number(fx).toFixed(2)}</div>
-        </div>
-        <div style={styles.card}>
-          <div style={styles.cardLabel}>Items</div>
-          <div style={styles.cardValue}>{rows.length}</div>
-        </div>
-        <div style={styles.card}>
-          <div style={styles.cardLabel}>Errors</div>
-          <div style={styles.cardValue}>
-            {(rows || []).filter((r) => r.wmError).length}
+          <div className="flex items-center gap-3 text-xs text-gray-400">
+            <div className="flex items-center gap-2">
+              <span className="h-2 w-2 rounded-full bg-green-500"></span>
+              Buff163 API: Server-side
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="h-2 w-2 rounded-full bg-green-500"></span>
+              MarketCSGO API: Server-side
+            </div>
           </div>
         </div>
-      </div>
+      </header>
 
-      {err ? <div style={styles.error}>{err}</div> : null}
+      <main className="max-w-6xl mx-auto px-4 py-6">
+        {/* Stats */}
+        <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
+          <StatCard
+            label="Profitable flips"
+            value={stats.profitableCount}
+            icon={<TrendingUp size={18} />}
+            color="text-green-400"
+          />
+          <StatCard
+            label="Avg. spread"
+            value={`${stats.avgSpread.toFixed(2)}%`}
+            icon={<DollarSign size={18} />}
+            color={stats.avgSpread >= 0 ? "text-green-400" : "text-red-400"}
+          />
+          <StatCard
+            label="Total volume"
+            value={stats.totalVolume}
+            icon={<Box size={18} />}
+            color="text-indigo-400"
+          />
+          <StatCard
+            label="Data status"
+            value={loading ? "Scanning..." : "Up to Date"}
+            icon={<RefreshCw size={18} className={loading ? "animate-spin" : ""} />}
+            color="text-purple-400"
+          />
+        </div>
 
-      <div style={styles.tableWrap}>
-        <table style={styles.table}>
-          <thead>
-            <tr>
-              <th style={styles.th}>Item</th>
-              <th style={styles.thRight}>BUFF (CNY)</th>
-              <th style={styles.thRight}>BUFF (USD)</th>
-              <th style={styles.thRight}>WM Buy Offer (USD)</th>
-              <th style={styles.thRight}>Spread</th>
-              <th style={styles.thRight}>Net</th>
-              <th style={styles.th}>Link</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((it, idx) => (
-              <tr key={it.id ?? idx} style={styles.tr}>
-                <td style={styles.td}>
-                  <div style={styles.itemCell}>
-                    <img
-                      src={it.image}
-                      alt=""
-                      style={styles.icon}
-                      onError={(e) => (e.currentTarget.style.display = "none")}
-                    />
-                    <div>
-                      <div style={styles.itemName}>{it.name}</div>
-                      {it.wmError ? (
-                        <div style={styles.miniErr}>WM: {it.wmError}</div>
-                      ) : null}
-                    </div>
-                  </div>
-                </td>
+        {/* Controls */}
+        <div className="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between mb-4">
+          <div className="flex-1 relative">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search skin name (e.g. Redline)..."
+              className="w-full pl-10 pr-3 py-2 rounded-xl bg-[#151619] border border-gray-800 text-sm placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-indigo-600/40"
+            />
+          </div>
 
-                <td style={styles.tdRight}>{Number(it.buffPrice || 0).toFixed(2)}</td>
-                <td style={styles.tdRight}>${Number(it.buffUsd || 0).toFixed(2)}</td>
-                <td style={styles.tdRight}>
-                  {Number(it.wmUsd || 0) > 0 ? `$${Number(it.wmUsd).toFixed(2)}` : "$0.00"}
-                </td>
-                <td style={styles.tdRight}>
-                  <span style={badge(it.spread)}>
-                    {Number.isFinite(it.spread) ? `${it.spread.toFixed(2)}%` : "0.00%"}
-                  </span>
-                </td>
-                <td style={styles.tdRight}>
-                  <span style={{ color: it.net >= 0 ? "#22c55e" : "#ef4444" }}>
-                    {it.net >= 0 ? "+" : "-"}${Math.abs(it.net).toFixed(2)}
-                  </span>
-                </td>
-                <td style={styles.td}>
-                  {it.wmUrl ? (
-                    <a style={styles.link} href={it.wmUrl} target="_blank" rel="noreferrer">
-                      Open
-                    </a>
-                  ) : (
-                    <span style={{ opacity: 0.6 }}>—</span>
-                  )}
-                </td>
-              </tr>
-            ))}
+          <div className="flex items-center gap-2">
+            <button
+              className="px-3 py-2 rounded-xl bg-[#151619] border border-gray-800 text-sm text-gray-300 hover:bg-[#202124] inline-flex items-center gap-2"
+              onClick={() => {}}
+              title="(placeholder) Advanced filters"
+            >
+              <Filter size={16} />
+              Advanced Filters
+            </button>
 
-            {!rows.length ? (
-              <tr>
-                <td colSpan={7} style={{ padding: 20, opacity: 0.7 }}>
-                  No items found. Click “Scan”.
-                </td>
-              </tr>
-            ) : null}
-          </tbody>
-        </table>
-      </div>
+            <input
+              type="number"
+              value={limit}
+              min={1}
+              max={100}
+              onChange={(e) => setLimit(Number(e.target.value || 30))}
+              className="w-20 px-3 py-2 rounded-xl bg-[#151619] border border-gray-800 text-sm text-gray-200 focus:outline-none"
+              title="Scan limit"
+            />
+
+            <button
+              onClick={fetchData}
+              disabled={loading}
+              className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-sm font-semibold inline-flex items-center gap-2"
+            >
+              {loading ? <RefreshCw size={16} className="animate-spin" /> : null}
+              Scan
+            </button>
+          </div>
+        </div>
+
+        {error ? (
+          <div className="mb-4 rounded-xl border border-red-900/50 bg-red-900/20 px-4 py-3 text-sm text-red-200">
+            {error}
+          </div>
+        ) : null}
+
+        {/* Table */}
+        <div className="bg-[#151619] border border-gray-800 rounded-2xl overflow-hidden shadow-lg">
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-800">
+              <thead className="bg-[#111214]">
+                <tr>
+                  <Th label="Item Details" sortKey="name" onClick={() => requestSort("name")} sortConfig={sortConfig} />
+                  <Th label="BUFF163 Price" sortKey="buffUsd" onClick={() => requestSort("buffUsd")} sortConfig={sortConfig} align="right" />
+                  <Th label="MCSGO Buy Order" sortKey="wmPrice" onClick={() => requestSort("wmPrice")} sortConfig={sortConfig} align="right" />
+                  <Th label="Spread" sortKey="profitPct" onClick={() => requestSort("profitPct")} sortConfig={sortConfig} align="center" />
+                  <Th label="Net Profit" sortKey="net" onClick={() => requestSort("net")} sortConfig={sortConfig} align="right" />
+                  <Th label="Quantity" sortKey="quantity" onClick={() => requestSort("quantity")} sortConfig={sortConfig} align="center" />
+                  <th scope="col" className="px-6 py-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Actions
+                  </th>
+                </tr>
+              </thead>
+
+              <tbody className="divide-y divide-gray-800">
+                {processedData.length ? (
+                  processedData.map((item) => (
+                    <React.Fragment key={item.id}>
+                      <tr
+                        key={item.id}
+                        onClick={() => setExpandedId(expandedId === item.id ? null : item.id)}
+                        className="hover:bg-[#202124] transition-colors group cursor-pointer"
+                      >
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <div className="flex items-center">
+                            <div className="flex-shrink-0 h-12 w-12 bg-[#25262b] rounded-lg overflow-hidden mr-4 border border-gray-700 group-hover:border-indigo-500 transition-colors">
+                              <img src={item.image} alt="" className="h-full w-full object-contain p-1" />
+                            </div>
+                            <div>
+                              <div className="text-sm font-medium text-white group-hover:text-indigo-400 transition-colors">{item.name}</div>
+                              <div className="text-xs text-gray-500 mt-0.5">{item.wear || "-"}</div>
+                              {item.error ? (
+                                <div className="text-xs text-amber-400 mt-1">API: {item.error}</div>
+                              ) : null}
+                            </div>
+                          </div>
+                        </td>
+
+                        <td className="px-6 py-4 whitespace-nowrap text-right">
+                          <div className="text-sm font-medium text-white">¥{Number(item.buffPrice).toFixed(2)}</div>
+                          <div className="text-xs text-gray-500">${Number(item.buffUsd).toFixed(2)}</div>
+                        </td>
+
+                        <td className="px-6 py-4 whitespace-nowrap text-right">
+                          <div className="text-sm font-medium text-white">${Number(item.wmPrice).toFixed(2)}</div>
+                          <div className="text-xs text-gray-500">{item.wmBuyQty || 0} orders</div>
+                        </td>
+
+                        <td className="px-6 py-4 whitespace-nowrap text-center">
+                          <span
+                            className={`px-3 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${
+                              item.profitPct > 0
+                                ? "bg-green-900/30 text-green-400 border border-green-800"
+                                : "bg-red-900/30 text-red-400 border border-red-800"
+                            }`}
+                          >
+                            {item.profitPct.toFixed(2)}%
+                          </span>
+                        </td>
+
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                          <span className={item.net > 0 ? "text-green-400" : "text-red-400"}>
+                            {item.net > 0 ? "+" : ""}${item.net.toFixed(2)}
+                          </span>
+                        </td>
+
+                        <td className="px-6 py-4 whitespace-nowrap text-center">
+                          <div className="text-sm text-gray-300">{item.quantity}</div>
+                          <div className="w-full bg-gray-800 rounded-full h-1.5 mt-1">
+                            <div
+                              className="bg-indigo-500 h-1.5 rounded-full"
+                              style={{ width: `${Math.min(100, (item.quantity / 1000) * 100)}%` }}
+                            ></div>
+                          </div>
+                        </td>
+
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                          <a
+                            href={item.wmUrl || "https://market.csgo.com/en/"}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="text-indigo-400 hover:text-indigo-300 bg-indigo-900/20 p-2 rounded-lg hover:bg-indigo-900/40 transition-colors inline-flex"
+                          >
+                            <ExternalLink size={16} />
+                          </a>
+                        </td>
+                      </tr>
+
+                      {expandedId === item.id && (
+                        <tr className="bg-[#17181b]">
+                          <td colSpan={7} className="px-6 py-4">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              <div className="bg-[#141517] border border-gray-800 rounded-xl p-4">
+                                <div className="text-sm font-semibold text-white mb-2">BUFF lowest 5 listings</div>
+                                {Array.isArray(item.buffListings) && item.buffListings.length > 0 ? (
+                                  <div className="space-y-1 text-sm text-gray-300">
+                                    {item.buffListings.slice(0, 5).map((l, idx) => (
+                                      <div key={idx} className="flex items-center justify-between">
+                                        <span className="text-gray-400">#{idx + 1}</span>
+                                        <span className="font-medium">¥{Number(l.priceCny || 0).toFixed(2)}</span>
+                                        <span className="text-gray-400">
+                                          float: {l.float == null ? "-" : Number(l.float).toFixed(6)}
+                                        </span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <div className="text-sm text-gray-500">No float listings returned.</div>
+                                )}
+                              </div>
+
+                              <div className="bg-[#141517] border border-gray-800 rounded-xl p-4">
+                                <div className="text-sm font-semibold text-white mb-2">MarketCSGO buy order</div>
+                                <div className="text-sm text-gray-300">
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-gray-400">Best buy order</span>
+                                    <span className="font-semibold text-white">
+                                      ${Number(item.wmPrice || 0).toFixed(2)}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center justify-between mt-2">
+                                    <span className="text-gray-400">Avg price (if available)</span>
+                                    <span className="text-gray-300">
+                                      {item.wmMeta?.avgUsd == null ? "-" : `$${Number(item.wmMeta.avgUsd).toFixed(2)}`}
+                                    </span>
+                                  </div>
+                                  {item.error ? (
+                                    <div className="mt-3 text-xs text-amber-400">API note: {item.error}</div>
+                                  ) : null}
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan="7" className="px-6 py-12 text-center text-gray-500">
+                      <div className="flex flex-col items-center justify-center">
+                        <Search size={48} className="text-gray-700 mb-4" />
+                        <p className="text-lg font-medium">No items found</p>
+                        <p className="text-sm">Try adjusting your search terms</p>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="bg-[#151619] px-4 py-3 border-t border-gray-800 flex items-center justify-between sm:px-6">
+            <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
+              <div>
+                <p className="text-sm text-gray-500">
+                  Showing <span className="font-medium text-gray-300">1</span> to{" "}
+                  <span className="font-medium text-gray-300">{processedData.length}</span> of{" "}
+                  <span className="font-medium text-gray-300">{items.length}</span> results
+                </p>
+              </div>
+              <div>
+                <nav className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
+                  <button className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-700 bg-[#1a1b1e] text-sm font-medium text-gray-400 hover:bg-[#25262b]">
+                    Previous
+                  </button>
+                  <button className="relative inline-flex items-center px-4 py-2 border border-gray-700 bg-[#25262b] text-sm font-medium text-white">
+                    1
+                  </button>
+                  <button className="relative inline-flex items-center px-4 py-2 border border-gray-700 bg-[#1a1b1e] text-sm font-medium text-gray-400 hover:bg-[#25262b]">
+                    2
+                  </button>
+                  <button className="relative inline-flex items-center px-4 py-2 border border-gray-700 bg-[#1a1b1e] text-sm font-medium text-gray-400 hover:bg-[#25262b]">
+                    3
+                  </button>
+                  <button className="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-700 bg-[#1a1b1e] text-sm font-medium text-gray-400 hover:bg-[#25262b]">
+                    Next
+                  </button>
+                </nav>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </main>
     </div>
   );
-}
-
-function badge(spread) {
-  const ok = Number(spread) > 0;
-  return {
-    display: "inline-block",
-    padding: "4px 10px",
-    borderRadius: 999,
-    border: "1px solid rgba(255,255,255,0.10)",
-    background: ok ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)",
-    color: ok ? "#22c55e" : "#ef4444",
-    fontWeight: 600,
-    fontSize: 12,
-  };
-}
-
-const styles = {
-  page: {
-    minHeight: "100vh",
-    background: "radial-gradient(1200px 600px at 50% 10%, #0c1a3a 0%, #070b16 55%)",
-    color: "#e7eefc",
-    fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial",
-    padding: 22,
-  },
-  header: {
-    display: "flex",
-    justifyContent: "space-between",
-    gap: 16,
-    alignItems: "center",
-    marginBottom: 16,
-  },
-  title: { fontSize: 22, fontWeight: 800 },
-  subTitle: { fontSize: 12, opacity: 0.7, marginTop: 2 },
-  controls: { display: "flex", gap: 10, alignItems: "center" },
-  input: {
-    width: 90,
-    padding: "10px 12px",
-    borderRadius: 10,
-    background: "rgba(255,255,255,0.04)",
-    border: "1px solid rgba(255,255,255,0.10)",
-    color: "#e7eefc",
-    outline: "none",
-  },
-  btn: {
-    padding: "10px 14px",
-    borderRadius: 10,
-    background: "#3b6cff",
-    border: "none",
-    color: "white",
-    fontWeight: 700,
-    cursor: "pointer",
-  },
-  metaRow: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 },
-  card: {
-    flex: "0 0 auto",
-    minWidth: 160,
-    padding: 14,
-    borderRadius: 14,
-    background: "rgba(255,255,255,0.04)",
-    border: "1px solid rgba(255,255,255,0.10)",
-  },
-  cardLabel: { fontSize: 11, opacity: 0.7 },
-  cardValue: { fontSize: 20, fontWeight: 800, marginTop: 6 },
-  error: {
-    padding: 12,
-    borderRadius: 12,
-    border: "1px solid rgba(239,68,68,0.35)",
-    background: "rgba(239,68,68,0.12)",
-    marginBottom: 14,
-  },
-  tableWrap: {
-    overflow: "auto",
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,0.10)",
-    background: "rgba(0,0,0,0.20)",
-  },
-  table: { width: "100%", borderCollapse: "collapse", minWidth: 980 },
-  th: {
-    textAlign: "left",
-    fontSize: 12,
-    opacity: 0.75,
-    padding: "14px 12px",
-    borderBottom: "1px solid rgba(255,255,255,0.10)",
-    position: "sticky",
-    top: 0,
-    background: "rgba(7,11,22,0.95)",
-    backdropFilter: "blur(6px)",
-  },
-  thRight: {
-    textAlign: "right",
-    fontSize: 12,
-    opacity: 0.75,
-    padding: "14px 12px",
-    borderBottom: "1px solid rgba(255,255,255,0.10)",
-    position: "sticky",
-    top: 0,
-    background: "rgba(7,11,22,0.95)",
-    backdropFilter: "blur(6px)",
-  },
-  tr: { borderBottom: "1px solid rgba(255,255,255,0.06)" },
-  td: { padding: "12px 12px", verticalAlign: "middle" },
-  tdRight: { padding: "12px 12px", textAlign: "right", verticalAlign: "middle" },
-  itemCell: { display: "flex", gap: 12, alignItems: "center" },
-  icon: { width: 44, height: 34, objectFit: "cover", borderRadius: 8, background: "rgba(255,255,255,0.04)" },
-  itemName: { fontWeight: 700, fontSize: 13 },
-  miniErr: { fontSize: 11, opacity: 0.75, marginTop: 2, color: "#f59e0b" },
-  link: { color: "#93c5fd", fontWeight: 700, textDecoration: "none" },
 };
+
+// Sub-components
+const StatCard = ({ label, value, icon, color }) => (
+  <div className="bg-[#1a1b1e] p-4 rounded-xl border border-gray-800 flex items-center justify-between hover:border-gray-700 transition-colors">
+    <div>
+      <p className="text-gray-500 text-xs font-medium uppercase tracking-wider">{label}</p>
+      <p className={`text-2xl font-bold mt-1 ${color ? color : "text-white"}`}>{value}</p>
+    </div>
+    <div className={`p-3 rounded-lg bg-opacity-10 ${color ? color.replace("text-", "bg-") : "bg-gray-700"} ${color}`}>
+      {icon}
+    </div>
+  </div>
+);
+
+const Th = ({ label, sortKey, onClick, sortConfig, align = "left" }) => {
+  const isActive = sortConfig.key === sortKey;
+
+  return (
+    <th
+      scope="col"
+      className={`px-6 py-4 text-${align} text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer hover:text-indigo-400 transition-colors select-none group`}
+      onClick={onClick}
+    >
+      <div className={`flex items-center gap-2 ${align === "right" ? "justify-end" : align === "center" ? "justify-center" : "justify-start"}`}>
+        {label}
+        <span className={`transform transition-opacity ${isActive ? "opacity-100" : "opacity-0 group-hover:opacity-50"}`}>
+          <ArrowUpDown size={14} className={isActive && sortConfig.direction === "asc" ? "transform rotate-180" : ""} />
+        </span>
+      </div>
+    </th>
+  );
+};
+
+export default App;
