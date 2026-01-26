@@ -119,7 +119,7 @@ async function fetchBuffItems(limit, fxCnyUsd) {
 
   // Using query params instead of building the string manually
   const data = await buffFetch("/api/market/goods", {
-    game: "cs2", // or "csgo" if that works better for your BUFF account
+    game: "csgo", // or "csgo" if that works better for your BUFF account
     page_num: 1,
     page_size: pageSize,
     sort_by: "price.desc",
