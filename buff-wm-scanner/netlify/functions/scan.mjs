@@ -1,6 +1,4 @@
-// Netlify function: Buff163 (CS) -> MarketCSGO (lowest sell offer)
-//
-// This keeps the same response shape your UI already expects.
+// Netlify function: Buff163 (CS2) -> MarketCSGO (lowest sell offer)
 //
 // Modes:
 //
@@ -9,9 +7,8 @@
 //
 // Required env vars for LIVE mode:
 //
-//   BUFF163_COOKIE        – your Buff cookies string (value of the Cookie header)
-//   BUFF163_REFERER       – (optional) referer, default Buff CSGO market
-//   BUFF_GAME             – (optional) "csgo" or "cs2", default "csgo"
+//   BUFF163_COOKIE        – your Buff cookies string
+//   BUFF163_REFERER       – (optional) referer, default Buff CS2 market
 //   FX_CNY_USD            – CNY → USD rate (e.g. 0.14)
 //   MARKETCSGO_API_KEY    – API key from https://market.csgo.com/en/api
 //
@@ -50,12 +47,9 @@ function fail(status, message, extra = {}) {
 
 // -------- BUFF163 client --------
 
-// Which game to query on Buff. Old script used CSGO, so we default to that.
-const BUFF_GAME = process.env.BUFF_GAME || "csgo"; // "csgo" or "cs2"
-
 const BUFF_COOKIE = process.env.BUFF163_COOKIE || "";
 const BUFF_REFERER =
-  process.env.BUFF163_REFERER || `https://buff.163.com/market/${BUFF_GAME}`;
+  process.env.BUFF163_REFERER || "https://buff.163.com/market/cs2";
 
 async function buffFetch(path) {
   const url = BUFF_BASE + path;
@@ -72,33 +66,31 @@ async function buffFetch(path) {
     },
   });
 
-  // For debugging bad states like "Login Required"
-  const text = await res.text();
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch (err) {
-    console.error("BUFF DEBUG (non-JSON)", {
-      url,
-      status: res.status,
-      snippet: text.slice(0, 200),
-    });
-    throw new Error(`BUFF non-JSON response HTTP ${res.status} at ${url}`);
-  }
-
-  console.info("BUFF DEBUG", {
+  const textSnippet = (await res.text()).slice(0, 200);
+  console.log("BUFF DEBUG", {
     url,
     status: res.status,
-    snippet: text.slice(0, 100),
+    snippet: textSnippet,
   });
 
-  if (json.code !== "OK") {
-    // Typical error example: { code: "Login Required", error: "Please login." }
-    throw new Error(
-      `BUFF HTTP ${res.status}, code=${json.code || "Unknown"}, msg=${json.error || "Unknown"}`
-    );
+  if (!res.ok) {
+    throw new Error(`BUFF HTTP ${res.status} at ${url}`);
   }
 
+  let json;
+  try {
+    json = JSON.parse(textSnippet);
+  } catch (err) {
+    throw new Error(`BUFF bad JSON at ${url}: ${String(err)}`);
+  }
+
+  if (json.code !== "OK") {
+    throw new Error(
+      `BUFF HTTP ${res.status}, code=${json.code || "Unknown"}, msg=${
+        json.error || "Unknown"
+      }.`
+    );
+  }
   return json;
 }
 
@@ -106,11 +98,9 @@ async function buffFetch(path) {
 async function fetchBuffItems(limit, fxCnyUsd) {
   const pageSize = Math.min(Math.max(1, limit), 60);
 
-  // Same style as your old WM scanner, but game is now configurable.
+  // **IMPORTANT**: this is the exact URL format that worked before.
   const data = await buffFetch(
-    `/api/market/goods?game=${encodeURIComponent(
-      BUFF_GAME
-    )}&page_num=1&page_size=${pageSize}&sort_by=price.desc`
+    `/api/market/goods?game=cs2&page_num=1&page_size=${pageSize}&sort_by=price.desc`
   );
 
   const goodsInfos = data.data.goods_infos || {};
@@ -176,8 +166,6 @@ async function mcsgoFetch(pathWithQuery) {
     throw new Error(`MarketCSGO bad JSON at ${url}: ${String(err)}`);
   }
 
-  // MarketCSGO examples: { success: true, data: [...] } or
-  // { success: false, error: "..." }
   if (json.success === false) {
     throw new Error(
       `MarketCSGO API error at ${url}: ${json.error || "Unknown"}`
@@ -212,10 +200,8 @@ async function mcsgoBestSell(hashName) {
       };
     }
 
-    // examples show `price` field on each entry
     const best = list.reduce(
-      (min, item) =>
-        Number(item.price) < Number(min.price) ? item : min,
+      (min, item) => (Number(item.price) < Number(min.price) ? item : min),
       list[0]
     );
 
