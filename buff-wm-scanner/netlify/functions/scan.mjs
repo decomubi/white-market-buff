@@ -1,15 +1,12 @@
 // Netlify Function (ESM) - Buff163 -> Market.CSGO (buy orders)
-// Place in: netlify/functions/scan.mjs
+// DEBUG VERSION: adds ?debugEnv=1 and ?debugBuff=1
 //
-// Updates:
-//   - Works with BUFF_COOKIE or BUFF163_COOKIE
-//   - Works with FX_CNYUSD or FX_CNY_USD
-//   - Fixes MarketCSGO prices/class_instance parsing so names actually match
+// Place in: netlify/functions/scan.mjs
 
 // ----- ENV -----
 
 const RAW_BUFF_COOKIE =
-  (process.env.BUFF_COOKIE || process.env.BUFF163_COOKIE || "").trim();
+  (process.env.BUFF163_COOKIE || process.env.BUFF_COOKIE || "").trim();
 
 // strip accidental newlines from Netlify UI
 const BUFF_COOKIE = RAW_BUFF_COOKIE.replace(/\r?\n/g, "");
@@ -83,27 +80,15 @@ function buffHeaders() {
 // ----- BUFF -----
 
 async function buffGoodsList(limit = 30) {
-  if (!BUFF_COOKIE) throw new Error("Missing BUFF_COOKIE / BUFF163_COOKIE env var");
-
   const json = await fetchJson(BUFF_LIST_URL, { headers: buffHeaders() });
+
   const items = json?.data?.items || [];
 
-  // Keep only items that have a valid sell_min_price
   const trimmed = items
     .filter((x) => x?.sell_min_price != null && x?.sell_num != null)
     .slice(0, limit);
 
-  return trimmed.map((x) => ({
-    goodsId: x.id,
-    name: x?.goods_info?.name || x?.name || "Unknown",
-    image:
-      x?.goods_info?.icon_url ||
-      x?.goods_info?.iconUrl ||
-      x?.goods_info?.original_icon_url ||
-      "",
-    buffMinPriceCny: Number(x.sell_min_price || 0),
-    sellNum: Number(x.sell_num || 0),
-  }));
+  return { raw: json, items: trimmed };
 }
 
 async function buffTopListings(goodsId, count = 5) {
@@ -145,10 +130,8 @@ async function mcsgosPricesMap() {
   if (Array.isArray(json)) {
     arr = json;
   } else if (Array.isArray(json?.items)) {
-    // items is already an array
     arr = json.items;
   } else if (json?.items && typeof json.items === "object") {
-    // Typical MarketCSGO structure: { success: true, items: { "name": { ... }, ... } }
     arr = Object.entries(json.items).map(([name, info]) => ({
       market_hash_name: name,
       ...info,
@@ -169,7 +152,6 @@ async function mcsgosPricesMap() {
       "";
     if (!n) continue;
 
-    // buy_order can be string; ensure Number
     const buyOrder =
       it?.buy_order ??
       it?.buyOrder ??
@@ -190,26 +172,83 @@ async function mcsgosPricesMap() {
 }
 
 function marketSearchUrl(name) {
-  // Item page URLs can vary; search URL always works.
   return `https://market.csgo.com/en/?search=${encodeURIComponent(name)}`;
 }
 
 // ----- Netlify handler -----
 
 export async function handler(event) {
+  const qs = new URLSearchParams(event.queryStringParameters || {});
+
+  // 1) Env debug
+  if (qs.get("debugEnv") === "1") {
+    return {
+      statusCode: 200,
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify({
+        BUFF163_COOKIE_len: (process.env.BUFF163_COOKIE || "").length,
+        BUFF_COOKIE_len: (process.env.BUFF_COOKIE || "").length,
+        BUFF_COOKIE_effective_len: BUFF_COOKIE.length,
+        FX_CNYUSD: process.env.FX_CNYUSD || "",
+        FX_CNY_USD: process.env.FX_CNY_USD || "",
+      }),
+    };
+  }
+
+  // 2) BUFF debug: see what BUFF actually returns
+  if (qs.get("debugBuff") === "1") {
+    try {
+      const json = await fetchJson(BUFF_LIST_URL, { headers: buffHeaders() });
+
+      return {
+        statusCode: 200,
+        headers: { "content-type": "application/json; charset=utf-8" },
+        body: JSON.stringify(
+          {
+            code: json.code || null,
+            msg: json.msg || json.error || null,
+            hasData: !!json.data,
+            itemsLen: json.data?.items?.length ?? null,
+            // small snippet so we can inspect structure
+            snippet: JSON.stringify(json).slice(0, 600),
+          },
+          null,
+          2
+        ),
+      };
+    } catch (err) {
+      return {
+        statusCode: 200,
+        headers: { "content-type": "application/json; charset=utf-8" },
+        body: JSON.stringify({ error: String(err?.message || err) }),
+      };
+    }
+  }
+
   try {
     const limit = Math.min(
       100,
       Math.max(
         1,
-        Number(
-          new URLSearchParams(event.queryStringParameters || {}).get("limit") ||
-            30
-        )
+        Number(qs.get("limit") || 30)
       )
     );
 
-    const buffItems = await buffGoodsList(limit);
+    const { raw: buffRaw, items: buffTrimmed } = await buffGoodsList(limit);
+
+    // if BUFF returned a non-OK code, surface it
+    if (buffRaw && buffRaw.code && buffRaw.code !== "OK") {
+      return {
+        statusCode: 200,
+        headers: { "content-type": "application/json; charset=utf-8" },
+        body: JSON.stringify({
+          ok: false,
+          error: `BUFF code=${buffRaw.code}, msg=${buffRaw.msg || buffRaw.error || "Unknown"}`,
+        }),
+      };
+    }
+
+    const buffItems = buffTrimmed;
 
     // Fetch Market.CSGO price map once per scan
     const mMap = await mcsgosPricesMap();
@@ -239,8 +278,8 @@ export async function handler(event) {
         buffPrice: x.buffMinPriceCny, // CNY
         quantity: x.sellNum,
         fx: FX_CNYUSD,
-        wmPrice, // USD (used by your UI)
-        wmBuyQty: null, // not provided by this endpoint
+        wmPrice, // USD
+        wmBuyQty: null,
         wmUrl: marketSearchUrl(x.name),
         buffListings: listings[i] || [],
         wmMeta: m || null,
