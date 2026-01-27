@@ -52,10 +52,17 @@ const RAW_BUFF_COOKIE = (
 
 const BUFF_COOKIE = RAW_BUFF_COOKIE.replace(/\r?\n/g, "");
 
+// try to extract csrf_token from cookie for header use
+const CSRF_TOKEN = (() => {
+  const m = BUFF_COOKIE.match(/csrf_token=([^;]+)/);
+  return m ? m[1] : "";
+})();
+
+// default referer updated to match browser (?game=csgo)
 const BUFF_REFERER =
   process.env.BUFF_REFERER ||
   process.env.BUFF163_REFERER ||
-  "https://buff.163.com/market/csgo";
+  "https://buff.163.com/market/?game=csgo";
 
 // FX can be FX_CNY_USD or FX_CNYUSD
 function getFx() {
@@ -73,25 +80,31 @@ async function buffFetch(path) {
     throw new Error("BUFF cookie missing (BUFF_COOKIE / BUFF163_COOKIE)");
   }
 
-  const res = await fetch(url, {
-    headers: {
-      Cookie: BUFF_COOKIE,
-      Referer: BUFF_REFERER,
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "X-Requested-With": "XMLHttpRequest",
-      Accept: "application/json, text/javascript, */*; q=0.01",
-    },
-  });
+  const headers = {
+    Accept: "application/json, text/javascript, */*; q=0.01",
+    "Accept-Language": "en-US,en;q=0.9",
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    Referer: BUFF_REFERER,
+    Origin: "https://buff.163.com",
+    "X-Requested-With": "XMLHttpRequest",
+    Cookie: BUFF_COOKIE,
+  };
 
+  // many CSRF setups also expect token in a header
+  if (CSRF_TOKEN) {
+    headers["X-CSRFToken"] = CSRF_TOKEN;
+  }
+
+  const res = await fetch(url, { headers });
   const text = await res.text();
 
-  // log a tiny snippet for debugging (already saw this in your logs)
+  // small snippet for debugging
   console.info("BUFF DEBUG", {
     url,
     status: res.status,
-    snippet: text.slice(0, 120),
+    snippet: text.slice(0, 200),
   });
 
   if (!res.ok) {
@@ -103,14 +116,14 @@ async function buffFetch(path) {
     json = JSON.parse(text);
   } catch (e) {
     throw new Error(
-      `BUFF bad JSON at ${url}: ${String(e)} snippet=${text.slice(0, 120)}`
+      `BUFF bad JSON at ${url}: ${String(e)} snippet=${text.slice(0, 200)}`
     );
   }
 
   if (json.code && json.code !== "OK") {
-    // this is exactly the "Login Required" you’re seeing
+    // this is where "Login Required" is thrown
     throw new Error(
-      `BUFF HTTP 200, code=${json.code}, msg=${json.error || "Unknown"}`
+      `BUFF HTTP 200, code=${json.code}, msg=${json.error || json.msg || "Unknown"}`
     );
   }
 
