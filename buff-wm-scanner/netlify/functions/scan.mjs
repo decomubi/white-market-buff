@@ -1,5 +1,5 @@
 // Netlify Function (ESM) - Buff163 -> Market.CSGO (buy orders)
-// DEBUG VERSION: adds ?debugEnv=1 and ?debugBuff=1
+// Uses BUFF goods list anonymously (no login), optional floats with cookie.
 //
 // Place in: netlify/functions/scan.mjs
 
@@ -7,8 +7,6 @@
 
 const RAW_BUFF_COOKIE =
   (process.env.BUFF163_COOKIE || process.env.BUFF_COOKIE || "").trim();
-
-// strip accidental newlines from Netlify UI
 const BUFF_COOKIE = RAW_BUFF_COOKIE.replace(/\r?\n/g, "");
 
 const FX_ENV = process.env.FX_CNYUSD || process.env.FX_CNY_USD || "0.14";
@@ -20,7 +18,6 @@ const FX_CNYUSD =
 const BUFF_LIST_URL =
   "https://buff.163.com/api/market/goods?game=csgo&page_num=1&page_size=200&sort_by=sell_num.desc";
 
-// First page of sell orders contains cheapest listings (with floats)
 function buffSellOrdersUrl(goodsId, pageSize = 5) {
   const url = new URL("https://buff.163.com/api/market/goods/sell_order");
   url.searchParams.set("game", "csgo");
@@ -55,7 +52,6 @@ async function fetchJson(url, options = {}) {
 
   if (ct.includes("application/json")) return JSON.parse(text);
 
-  // Sometimes APIs respond with JSON but wrong content-type
   try {
     return JSON.parse(text);
   } catch {
@@ -63,24 +59,36 @@ async function fetchJson(url, options = {}) {
   }
 }
 
+// Optional BUFF headers only for float listings
 function buffHeaders() {
-  if (!BUFF_COOKIE) {
-    throw new Error("Missing BUFF_COOKIE / BUFF163_COOKIE env var");
-  }
-
-  return {
-    cookie: BUFF_COOKIE, // same as your working version
+  const headers = {
     "user-agent":
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
     referer: "https://buff.163.com/market/csgo",
     accept: "application/json, text/plain, */*",
+    "x-requested-with": "XMLHttpRequest",
   };
+  if (BUFF_COOKIE) headers.cookie = BUFF_COOKIE;
+  return headers;
+}
+
+function normalizeName(name) {
+  return String(name || "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 // ----- BUFF -----
 
+// GOODS LIST: anonymous (no cookie)
 async function buffGoodsList(limit = 30) {
-  const json = await fetchJson(BUFF_LIST_URL, { headers: buffHeaders() });
+  const json = await fetchJson(BUFF_LIST_URL); // no headers at all
+
+  if (json.code && json.code !== "OK") {
+    throw new Error(
+      `BUFF goods error: code=${json.code}, msg=${json.msg || json.error || "Unknown"}`
+    );
+  }
 
   const items = json?.data?.items || [];
 
@@ -88,14 +96,29 @@ async function buffGoodsList(limit = 30) {
     .filter((x) => x?.sell_min_price != null && x?.sell_num != null)
     .slice(0, limit);
 
-  return { raw: json, items: trimmed };
+  return trimmed.map((x) => ({
+    goodsId: x.id,
+    name: x?.goods_info?.name || x?.name || "Unknown",
+    image:
+      x?.goods_info?.icon_url ||
+      x?.goods_info?.iconUrl ||
+      x?.goods_info?.original_icon_url ||
+      "",
+    buffMinPriceCny: Number(x.sell_min_price || 0),
+    sellNum: Number(x.sell_num || 0),
+  }));
 }
 
+// FLOAT LISTINGS: best-effort, may require login; failures return []
 async function buffTopListings(goodsId, count = 5) {
-  // Returns: [{ priceCny, float }]
   try {
     const url = buffSellOrdersUrl(goodsId, count);
     const json = await fetchJson(url, { headers: buffHeaders() });
+
+    if (json.code && json.code !== "OK") {
+      // login required or other error; just ignore for floats
+      return [];
+    }
 
     const list = json?.data?.items || json?.data?.sell_orders || [];
     return (list || []).slice(0, count).map((o) => {
@@ -114,19 +137,12 @@ async function buffTopListings(goodsId, count = 5) {
   }
 }
 
-function normalizeName(name) {
-  return String(name || "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 // ----- MarketCSGO -----
 
 async function mcsgosPricesMap() {
   const json = await fetchJson(MCSGO_PRICES_URL);
 
   let arr;
-
   if (Array.isArray(json)) {
     arr = json;
   } else if (Array.isArray(json?.items)) {
@@ -195,10 +211,10 @@ export async function handler(event) {
     };
   }
 
-  // 2) BUFF debug: see what BUFF actually returns
+  // 2) BUFF debug: anonymous goods call
   if (qs.get("debugBuff") === "1") {
     try {
-      const json = await fetchJson(BUFF_LIST_URL, { headers: buffHeaders() });
+      const json = await fetchJson(BUFF_LIST_URL); // no headers
 
       return {
         statusCode: 200,
@@ -209,7 +225,6 @@ export async function handler(event) {
             msg: json.msg || json.error || null,
             hasData: !!json.data,
             itemsLen: json.data?.items?.length ?? null,
-            // small snippet so we can inspect structure
             snippet: JSON.stringify(json).slice(0, 600),
           },
           null,
@@ -228,32 +243,16 @@ export async function handler(event) {
   try {
     const limit = Math.min(
       100,
-      Math.max(
-        1,
-        Number(qs.get("limit") || 30)
-      )
+      Math.max(1, Number(qs.get("limit") || 30))
     );
 
-    const { raw: buffRaw, items: buffTrimmed } = await buffGoodsList(limit);
+    // 1) BUFF goods (anonymous)
+    const buffItems = await buffGoodsList(limit);
 
-    // if BUFF returned a non-OK code, surface it
-    if (buffRaw && buffRaw.code && buffRaw.code !== "OK") {
-      return {
-        statusCode: 200,
-        headers: { "content-type": "application/json; charset=utf-8" },
-        body: JSON.stringify({
-          ok: false,
-          error: `BUFF code=${buffRaw.code}, msg=${buffRaw.msg || buffRaw.error || "Unknown"}`,
-        }),
-      };
-    }
-
-    const buffItems = buffTrimmed;
-
-    // Fetch Market.CSGO price map once per scan
+    // 2) MarketCSGO price map once
     const mMap = await mcsgosPricesMap();
 
-    // Fetch Buff float listings in parallel
+    // 3) BUFF floats (best-effort) in parallel
     const listings = await Promise.all(
       buffItems.map((x) => buffTopListings(x.goodsId, 5))
     );
