@@ -3,47 +3,87 @@ import {
   Search,
   ArrowUpDown,
   TrendingUp,
+  TrendingDown,
   Box,
   RefreshCw,
   Filter,
   ExternalLink,
+  Activity,
 } from "lucide-react";
 
+// --------------- utility ---------------
+const fmt = (n) => `$${Number(n || 0).toFixed(2)}`;
+const fmtPct = (n) => `${Number(n || 0).toFixed(2)}%`;
+
+// --------------- sub-components ---------------
+const MetricCard = ({ title, value, sub, icon: Icon, accent = "indigo" }) => {
+  const colors = {
+    indigo: "text-indigo-400 bg-indigo-500/10",
+    emerald: "text-emerald-400 bg-emerald-500/10",
+    violet: "text-violet-400 bg-violet-500/10",
+    red: "text-red-400 bg-red-500/10",
+  };
+  return (
+    <div className="bg-slate-900/60 border border-slate-800/80 rounded-2xl px-4 py-3 flex items-center justify-between">
+      <div>
+        <p className="text-[10px] text-slate-400 uppercase tracking-wide mb-1">{title}</p>
+        <p className="text-sm font-semibold">{value}</p>
+        {sub && <p className="text-[10px] text-slate-500 mt-1">{sub}</p>}
+      </div>
+      <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${colors[accent]}`}>
+        <Icon size={16} />
+      </div>
+    </div>
+  );
+};
+
+const SortHeader = ({ label, sortKey, sortConfig, onSort, align = "right" }) => {
+  const active = sortConfig.key === sortKey;
+  const justify = align === "center" ? "justify-center" : "justify-end";
+  return (
+    <th
+      className="px-4 py-3 text-[11px] font-medium text-slate-400 select-none cursor-pointer hover:text-slate-200 transition-colors"
+      onClick={() => onSort(sortKey)}
+    >
+      <div className={`flex items-center gap-1.5 ${justify}`}>
+        <span>{label}</span>
+        <ArrowUpDown
+          size={12}
+          className={`transition-transform ${active ? (sortConfig.direction === "asc" ? "rotate-180" : "") : "opacity-40"}`}
+        />
+      </div>
+    </th>
+  );
+};
+
+// --------------- main app ---------------
 const App = () => {
   const [items, setItems] = useState([]);
   const [fx, setFx] = useState(0.14);
-  const [searchTerm, setSearchTerm] = useState("");
-  const [limit, setLimit] = useState(10);
+  const [search, setSearch] = useState("");
+  const [limit, setLimit] = useState(20);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [lastUpdated, setLastUpdated] = useState(null);
-  const [sortConfig, setSortConfig] = useState({
-    key: "netProfitUsd",
-    direction: "desc",
-  });
+  const [sortConfig, setSortConfig] = useState({ key: "profitUsd", direction: "desc" });
   const [onlyProfitable, setOnlyProfitable] = useState(false);
 
-  // ---------- FETCH FROM NETLIFY FUNCTION ----------
+  // --------------- fetch ---------------
   const fetchData = async () => {
     setLoading(true);
     setError("");
-
     try {
-      const res = await fetch(`/.netlify/functions/scan?limit=${limit}`);
+      const params = new URLSearchParams({ limit: String(limit) });
+      if (search.trim()) params.set("search", search.trim());
 
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status} from scan function`);
-      }
+      const res = await fetch(`/.netlify/functions/scan?${params}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status} from scan function`);
 
       const data = await res.json();
-
-      if (!data.ok) {
-        throw new Error(data.error || "Scan failed");
-      }
+      if (!data.ok) throw new Error(data.error || "Scan failed");
 
       setItems(Array.isArray(data.items) ? data.items : []);
       if (typeof data.fx === "number") setFx(data.fx);
-
       setLastUpdated(new Date());
     } catch (err) {
       console.error("Scan error:", err);
@@ -55,148 +95,91 @@ const App = () => {
   };
 
   useEffect(() => {
-    // Optional: auto-scan on page load
     fetchData();
   }, []);
 
-  // ---------- METRICS ----------
-  const profitableItems = useMemo(
-    () => items.filter((i) => Number(i.netProfitUsd) > 0),
-    [items]
-  );
-
-  const profitableFlips = profitableItems.length;
+  // --------------- derived metrics ---------------
+  const profitableCount = useMemo(() => items.filter((i) => i.profitUsd > 0).length, [items]);
 
   const avgSpread = useMemo(() => {
     if (!items.length) return 0;
-    const sum = items.reduce(
-      (acc, item) => acc + (Number(item.spreadPct) || 0),
-      0
-    );
-    return sum / items.length;
+    return items.reduce((sum, i) => sum + (Number(i.spreadPct) || 0), 0) / items.length;
   }, [items]);
 
-  const totalVolumeUsd = useMemo(() => {
-    return items.reduce(
-      (acc, item) => acc + (Number(item.buffUsd) || 0),
-      0
-    );
-  }, [items]);
+  const totalVolume = useMemo(
+    () => items.reduce((sum, i) => sum + (Number(i.buffPriceUsd) || 0), 0),
+    [items]
+  );
 
-  // ---------- SORT + FILTER ----------
-  const sortedAndFilteredItems = useMemo(() => {
-    let result = [...items];
-
-    if (searchTerm.trim()) {
-      const q = searchTerm.toLowerCase();
-      result = result.filter((item) =>
-        (item.name || "").toLowerCase().includes(q)
-      );
-    }
-
-    if (onlyProfitable) {
-      result = result.filter((i) => Number(i.netProfitUsd) > 0);
-    }
-
-    if (sortConfig.key) {
-      const { key, direction } = sortConfig;
-      result.sort((a, b) => {
-        const av = a[key] ?? 0;
-        const bv = b[key] ?? 0;
-        if (typeof av === "string" && typeof bv === "string") {
-          return direction === "asc"
-            ? av.localeCompare(bv)
-            : bv.localeCompare(av);
-        }
-        const na = Number(av) || 0;
-        const nb = Number(bv) || 0;
-        return direction === "asc" ? na - nb : nb - na;
-      });
-    }
-
-    return result;
-  }, [items, searchTerm, sortConfig, onlyProfitable]);
-
+  // --------------- sort + filter ---------------
   const handleSort = (key) => {
-    setSortConfig((prev) => {
-      if (prev.key === key) {
-        return {
-          key,
-          direction: prev.direction === "asc" ? "desc" : "asc",
-        };
-      }
-      return { key, direction: "desc" };
-    });
+    setSortConfig((prev) =>
+      prev.key === key
+        ? { key, direction: prev.direction === "asc" ? "desc" : "asc" }
+        : { key, direction: "desc" }
+    );
   };
 
-  const formatUsd = (value) =>
-    typeof value === "number"
-      ? `$${value.toFixed(2)}`
-      : value
-      ? `$${Number(value).toFixed(2)}`
-      : "$0.00";
+  const visible = useMemo(() => {
+    let res = [...items];
 
-  const formatPct = (value) =>
-    typeof value === "number"
-      ? `${value.toFixed(2)}%`
-      : value
-      ? `${Number(value).toFixed(2)}%`
-      : "0.00%";
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      res = res.filter((i) => (i.name || "").toLowerCase().includes(q));
+    }
+    if (onlyProfitable) res = res.filter((i) => i.profitUsd > 0);
 
+    const { key, direction } = sortConfig;
+    res.sort((a, b) => {
+      const av = Number(a[key]) || 0;
+      const bv = Number(b[key]) || 0;
+      return direction === "asc" ? av - bv : bv - av;
+    });
+
+    return res;
+  }, [items, search, onlyProfitable, sortConfig]);
+
+  // --------------- render ---------------
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
       <div className="max-w-7xl mx-auto px-4 py-6">
+
         {/* HEADER */}
-        <header className="flex items-center justify-between mb-6">
+        <header className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-3">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center shadow-lg shadow-indigo-600/40">
-              <TrendingUp size={18} />
+              <Activity size={18} />
             </div>
             <div>
-              <h1 className="text-lg font-semibold tracking-tight">
-                ArbitrageScanner
-              </h1>
-              <p className="text-xs text-slate-400">
-                Buff163 to MarketCSGO
-              </p>
+              <h1 className="text-lg font-semibold tracking-tight">ArbitrageScanner</h1>
+              <p className="text-xs text-slate-400">Buff163 → White.Market buy orders</p>
             </div>
           </div>
-
           <div className="flex items-center gap-4 text-xs text-slate-400">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
               <span className="h-2 w-2 rounded-full bg-emerald-500" />
-              <span>Buff163 API: Server-side</span>
+              <span>Buff163 API</span>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
               <span className="h-2 w-2 rounded-full bg-emerald-500" />
-              <span>MarketCSGO API: Server-side</span>
+              <span>White.Market API</span>
             </div>
           </div>
         </header>
 
         {/* METRIC CARDS */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-          <MetricCard
-            title="Profitable flips"
-            value={profitableFlips}
-            icon={TrendingUp}
-            accent="emerald"
-          />
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+          <MetricCard title="Profitable flips" value={profitableCount} icon={TrendingUp} accent="emerald" />
           <MetricCard
             title="Avg. spread"
-            value={formatPct(avgSpread)}
+            value={fmtPct(avgSpread)}
             icon={ArrowUpDown}
             accent={avgSpread >= 0 ? "emerald" : "red"}
           />
-          <MetricCard
-            title="Total volume"
-            value={formatUsd(totalVolumeUsd)}
-            icon={Box}
-            accent="indigo"
-          />
+          <MetricCard title="Total volume" value={fmt(totalVolume)} icon={Box} accent="indigo" />
           <MetricCard
             title="Data status"
-            value="Up to Date"
+            value={loading ? "Scanning…" : lastUpdated ? "Up to Date" : "Ready"}
             sub={`FX CNY→USD: ${fx.toFixed(2)}`}
             icon={RefreshCw}
             accent="violet"
@@ -206,37 +189,36 @@ const App = () => {
         {/* SEARCH + CONTROLS */}
         <div className="flex flex-col md:flex-row gap-3 items-center mb-4">
           <div className="flex-1 w-full relative">
-            <Search
-              size={16}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500"
-            />
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
             <input
               type="text"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="Search skin name (e.g. Redline)..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search skin name (e.g. Redline)…"
               className="w-full bg-slate-900/70 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-slate-500"
             />
           </div>
 
           <button
             type="button"
-            className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900/70 border border-slate-800 text-xs text-slate-300 hover:border-indigo-500 hover:text-indigo-300 transition-colors"
             onClick={() => setOnlyProfitable((v) => !v)}
+            className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-xs transition-colors ${
+              onlyProfitable
+                ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-300"
+                : "bg-slate-900/70 border-slate-800 text-slate-300 hover:border-indigo-500 hover:text-indigo-300"
+            }`}
           >
             <Filter size={14} />
-            {onlyProfitable ? "Only profitable ✓" : "Only profitable"}
+            Only profitable{onlyProfitable ? " ✓" : ""}
           </button>
 
           <div className="flex items-center gap-2">
             <input
               type="number"
               min={1}
-              max={100}
+              max={50}
               value={limit}
-              onChange={(e) =>
-                setLimit(Math.max(1, Math.min(100, Number(e.target.value) || 1)))
-              }
+              onChange={(e) => setLimit(Math.max(1, Math.min(50, Number(e.target.value) || 1)))}
               className="w-16 bg-slate-900/70 border border-slate-800 rounded-xl px-2 py-2 text-xs text-center focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
             />
             <button
@@ -257,7 +239,7 @@ const App = () => {
 
         {/* ERROR BANNER */}
         {error && (
-          <div className="mb-4 rounded-xl border border-red-500/40 bg-red-500/10 text-xs text-red-300 px-4 py-2">
+          <div className="mb-4 rounded-xl border border-red-500/40 bg-red-500/10 text-xs text-red-300 px-4 py-2.5">
             Scan failed: {error}
           </div>
         )}
@@ -268,165 +250,106 @@ const App = () => {
             <table className="min-w-full text-xs">
               <thead className="bg-slate-900/80 border-b border-slate-800/80">
                 <tr>
-                  <th className="px-4 py-3 text-left font-medium text-slate-400 text-[11px]">
-                    Item details
-                  </th>
-                  <SortableHeader
-                    label="BUFF163 price"
-                    sortKey="buffUsd"
-                    sortConfig={sortConfig}
-                    onSort={handleSort}
-                    align="right"
-                  />
-                  <SortableHeader
-                    label="MCSGO buy order"
-                    sortKey="mcsgPrice"
-                    sortConfig={sortConfig}
-                    onSort={handleSort}
-                    align="right"
-                  />
-                  <SortableHeader
-                    label="Spread"
-                    sortKey="spreadPct"
-                    sortConfig={sortConfig}
-                    onSort={handleSort}
-                    align="right"
-                  />
-                  <SortableHeader
-                    label="Net profit"
-                    sortKey="netProfitUsd"
-                    sortConfig={sortConfig}
-                    onSort={handleSort}
-                    align="right"
-                  />
-                  <SortableHeader
-                    label="Quantity"
-                    sortKey="quantity"
-                    sortConfig={sortConfig}
-                    onSort={handleSort}
-                    align="center"
-                  />
-                  <th className="px-4 py-3 text-center font-medium text-slate-400 text-[11px]">
-                    Actions
-                  </th>
+                  <th className="px-4 py-3 text-left font-medium text-slate-400 text-[11px]">Item</th>
+                  <SortHeader label="Buff price" sortKey="buffPriceUsd" sortConfig={sortConfig} onSort={handleSort} />
+                  <SortHeader label="WM buy order" sortKey="wmBuyOrderUsd" sortConfig={sortConfig} onSort={handleSort} />
+                  <SortHeader label="Spread" sortKey="spreadPct" sortConfig={sortConfig} onSort={handleSort} />
+                  <SortHeader label="Profit" sortKey="profitUsd" sortConfig={sortConfig} onSort={handleSort} />
+                  <SortHeader label="Qty" sortKey="buffQuantity" sortConfig={sortConfig} onSort={handleSort} align="center" />
+                  <th className="px-4 py-3 text-center font-medium text-slate-400 text-[11px]">Links</th>
                 </tr>
               </thead>
               <tbody>
-                {!loading && sortedAndFilteredItems.length === 0 && (
+                {!loading && visible.length === 0 && (
                   <tr>
-                    <td
-                      colSpan={7}
-                      className="px-4 py-10 text-center text-slate-500 text-xs"
-                    >
-                      No items found. Click &quot;Scan&quot;.
+                    <td colSpan={7} className="px-4 py-10 text-center text-slate-500 text-xs">
+                      {items.length === 0 ? 'No items found. Click "Scan".' : "No items match your filter."}
                     </td>
                   </tr>
                 )}
 
-                {sortedAndFilteredItems.map((item) => {
-                  const profit = Number(item.netProfitUsd) || 0;
+                {visible.map((item) => {
+                  const profit = Number(item.profitUsd) || 0;
                   const spread = Number(item.spreadPct) || 0;
-                  const spreadColor =
-                    spread > 0
-                      ? "text-emerald-400 bg-emerald-500/10"
-                      : "text-red-400 bg-red-500/10";
+                  const isPositive = profit > 0;
 
                   return (
-                    <tr
-                      key={item.id}
-                      className="border-t border-slate-800/60 hover:bg-slate-900/60 transition-colors"
-                    >
-                      {/* ITEM DETAILS */}
+                    <tr key={item.id} className="border-t border-slate-800/60 hover:bg-slate-800/30 transition-colors">
+                      {/* ITEM */}
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-lg bg-slate-800/80 overflow-hidden flex items-center justify-center">
+                          <div className="w-10 h-10 rounded-lg bg-slate-800/80 overflow-hidden flex items-center justify-center flex-shrink-0">
                             {item.image ? (
-                              <img
-                                src={item.image}
-                                alt={item.name}
-                                className="w-full h-full object-cover"
-                              />
+                              <img src={item.image} alt={item.name} className="w-full h-full object-cover" />
                             ) : (
-                              <Box size={16} className="text-slate-500" />
+                              <Box size={16} className="text-slate-600" />
                             )}
                           </div>
-                          <div className="flex flex-col">
-                            <span className="text-[11px] font-medium">
-                              {item.name}
-                            </span>
-                            <span className="text-[10px] text-slate-500">
-                              {item.wear || "-"}
-                            </span>
-                            {item.note && (
-                              <span className="text-[10px] text-amber-400/80 mt-0.5">
-                                API: {item.note}
-                              </span>
-                            )}
-                          </div>
+                          <span className="text-[11px] font-medium leading-snug">{item.name}</span>
                         </div>
                       </td>
 
                       {/* BUFF PRICE */}
                       <td className="px-4 py-3 text-right text-[11px]">
                         <div className="flex flex-col items-end">
-                          <span>{item.buffPrice ?? "-"}</span>
-                          <span className="text-slate-500">
-                            {formatUsd(item.buffUsd)}
-                          </span>
+                          <span className="font-medium">{fmt(item.buffPriceUsd)}</span>
+                          <span className="text-slate-500 text-[10px]">¥{Number(item.buffPriceCny || 0).toFixed(2)}</span>
                         </div>
                       </td>
 
-                      {/* MCSGO PRICE */}
+                      {/* WM BUY ORDER */}
                       <td className="px-4 py-3 text-right text-[11px]">
                         <div className="flex flex-col items-end">
-                          <span>{formatUsd(item.mcsgPrice)}</span>
-                          <span className="text-slate-500">
-                            {item.mcsgOrders || 0} orders
-                          </span>
+                          <span className="font-medium">{item.wmBuyOrderUsd > 0 ? fmt(item.wmBuyOrderUsd) : <span className="text-slate-600">—</span>}</span>
+                          <span className="text-slate-500 text-[10px]">{item.wmOrderCount || 0} orders</span>
                         </div>
                       </td>
 
                       {/* SPREAD */}
                       <td className="px-4 py-3 text-right text-[11px]">
                         <span
-                          className={`inline-flex items-center px-2 py-0.5 rounded-full ${spreadColor}`}
+                          className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium ${
+                            isPositive ? "text-emerald-400 bg-emerald-500/10" : "text-red-400 bg-red-500/10"
+                          }`}
                         >
-                          {formatPct(spread)}
+                          {isPositive ? "+" : ""}{fmtPct(spread)}
                         </span>
                       </td>
 
-                      {/* NET PROFIT */}
-                      <td className="px-4 py-3 text-right text-[11px]">
-                        <span
-                          className={
-                            profit > 0 ? "text-emerald-400" : "text-red-400"
-                          }
-                        >
-                          {formatUsd(profit)}
+                      {/* PROFIT */}
+                      <td className="px-4 py-3 text-right text-[11px] font-semibold">
+                        <span className={isPositive ? "text-emerald-400" : "text-red-400"}>
+                          {isPositive ? "+" : ""}{fmt(profit)}
                         </span>
                       </td>
 
                       {/* QUANTITY */}
-                      <td className="px-4 py-3 text-center text-[11px]">
-                        {item.quantity ?? "-"}
+                      <td className="px-4 py-3 text-center text-[11px] text-slate-300">
+                        {item.buffQuantity || "—"}
                       </td>
 
-                      {/* ACTIONS */}
-                      <td className="px-4 py-3 text-center text-[11px]">
-                        {item.mcsgUrl ? (
+                      {/* LINKS */}
+                      <td className="px-4 py-3">
+                        <div className="flex items-center justify-center gap-2">
                           <a
-                            href={item.mcsgUrl}
+                            href={`https://buff.163.com/market/csgo?search=${encodeURIComponent(item.name)}`}
                             target="_blank"
                             rel="noreferrer"
-                            className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-slate-900/80 border border-slate-700 hover:border-indigo-500 hover:text-indigo-400 transition-colors"
+                            title="Open on Buff163"
+                            className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-slate-800 border border-slate-700 text-slate-400 hover:border-indigo-500 hover:text-indigo-400 transition-colors"
                           >
-                            <ExternalLink size={14} />
+                            <ExternalLink size={13} />
                           </a>
-                        ) : (
-                          <span className="text-slate-600 text-[10px]">
-                            —
-                          </span>
-                        )}
+                          <a
+                            href={`https://white.market/csgo/search?search=${encodeURIComponent(item.name)}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            title="Open on White.Market"
+                            className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-slate-800 border border-slate-700 text-slate-400 hover:border-emerald-500 hover:text-emerald-400 transition-colors"
+                          >
+                            <ExternalLink size={13} />
+                          </a>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -435,81 +358,14 @@ const App = () => {
             </table>
           </div>
 
+          {/* FOOTER */}
           <div className="px-4 py-2 border-t border-slate-800/80 text-[10px] text-slate-500 flex items-center justify-between">
-            <span>
-              Showing {sortedAndFilteredItems.length} results
-            </span>
-            <span>
-              Last updated:{" "}
-              {lastUpdated
-                ? lastUpdated.toLocaleTimeString()
-                : "—"}
-            </span>
+            <span>Showing {visible.length} result{visible.length !== 1 ? "s" : ""}</span>
+            <span>Last updated: {lastUpdated ? lastUpdated.toLocaleTimeString() : "—"}</span>
           </div>
         </div>
       </div>
     </div>
-  );
-};
-
-// ---------- SMALL COMPONENTS ----------
-
-const MetricCard = ({ title, value, sub, icon: Icon, accent = "indigo" }) => {
-  const colorMap = {
-    indigo: "text-indigo-400 bg-indigo-500/10",
-    emerald: "text-emerald-400 bg-emerald-500/10",
-    violet: "text-violet-400 bg-violet-500/10",
-    red: "text-red-400 bg-red-500/10",
-  };
-
-  return (
-    <div className="bg-slate-900/60 border border-slate-800/80 rounded-2xl px-4 py-3 flex items-center justify-between">
-      <div>
-        <p className="text-[10px] text-slate-400 uppercase tracking-wide mb-1">
-          {title}
-        </p>
-        <p className="text-sm font-semibold">{value}</p>
-        {sub && (
-          <p className="text-[10px] text-slate-500 mt-1">
-            {sub}
-          </p>
-        )}
-      </div>
-      <div
-        className={`w-9 h-9 rounded-xl flex items-center justify-center ${colorMap[accent]}`}
-      >
-        <Icon size={16} />
-      </div>
-    </div>
-  );
-};
-
-const SortableHeader = ({ label, sortKey, sortConfig, onSort, align }) => {
-  const isActive = sortConfig.key === sortKey;
-  const justify =
-    align === "right"
-      ? "justify-end"
-      : align === "center"
-      ? "justify-center"
-      : "justify-start";
-
-  return (
-    <th
-      className={`px-4 py-3 text-${align} text-[11px] font-medium text-slate-400 select-none`}
-      onClick={() => onSort(sortKey)}
-    >
-      <div className={`flex items-center gap-2 cursor-pointer ${justify}`}>
-        <span>{label}</span>
-        <ArrowUpDown
-          size={14}
-          className={
-            isActive && sortConfig.direction === "asc"
-              ? "transform rotate-180"
-              : ""
-          }
-        />
-      </div>
-    </th>
   );
 };
 
