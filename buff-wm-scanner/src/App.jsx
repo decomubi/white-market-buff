@@ -69,6 +69,7 @@ const App = () => {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [sortConfig, setSortConfig] = useState({ key: "profitUsd", direction: "desc" });
   const [onlyProfitable, setOnlyProfitable] = useState(false);
+  const [expandedItem, setExpandedItem] = useState(null); // { name, orders: [...], totalCount, loading }
 
   // --------------- fetch ---------------
   const fetchData = async () => {
@@ -101,6 +102,24 @@ const App = () => {
   useEffect(() => {
     fetchData();
   }, []);
+
+  // --------------- order detail fetch ---------------
+  const handleRowClick = async (item) => {
+    // Toggle off if clicking same item
+    if (expandedItem?.name === item.name) {
+      setExpandedItem(null);
+      return;
+    }
+    // Show loading state immediately
+    setExpandedItem({ name: item.name, orders: [], totalCount: 0, loading: true });
+    try {
+      const res = await fetch(`/.netlify/functions/scan?orders=${encodeURIComponent(item.name)}`);
+      const data = await res.json();
+      setExpandedItem({ name: item.name, orders: data.orders || [], totalCount: data.totalCount || 0, loading: false });
+    } catch (e) {
+      setExpandedItem({ name: item.name, orders: [], totalCount: 0, loading: false, error: e.message });
+    }
+  };
 
   // --------------- derived metrics ---------------
   const profitableCount = useMemo(() => items.filter((i) => i.profitUsd > 0).length, [items]);
@@ -298,9 +317,14 @@ const App = () => {
                   const profit = Number(item.profitUsd) || 0;
                   const spread = Number(item.spreadPct) || 0;
                   const isPositive = profit > 0;
+                  const isExpanded = expandedItem?.name === item.name;
 
                   return (
-                    <tr key={item.id} className="border-t border-slate-800/60 hover:bg-slate-800/30 transition-colors">
+                    <React.Fragment key={item.id}>
+                    <tr
+                      className={`border-t border-slate-800/60 transition-colors cursor-pointer ${isExpanded ? "bg-slate-800/40" : "hover:bg-slate-800/30"}`}
+                      onClick={() => handleRowClick(item)}
+                    >
                       {/* ITEM */}
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-3">
@@ -311,7 +335,10 @@ const App = () => {
                               <Box size={16} className="text-slate-600" />
                             )}
                           </div>
-                          <span className="text-[11px] font-medium leading-snug">{item.name}</span>
+                          <div className="flex flex-col">
+                            <span className="text-[11px] font-medium leading-snug">{item.name}</span>
+                            <span className="text-[9px] text-slate-600 mt-0.5">{isExpanded ? "▲ collapse" : "▼ click for orders"}</span>
+                          </div>
                         </div>
                       </td>
 
@@ -355,7 +382,7 @@ const App = () => {
                       </td>
 
                       {/* LINKS */}
-                      <td className="px-4 py-3">
+                      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-center justify-center gap-2">
                           <a
                             href={`https://buff.163.com/market/csgo?search=${encodeURIComponent(item.name)}`}
@@ -378,6 +405,41 @@ const App = () => {
                         </div>
                       </td>
                     </tr>
+
+                    {/* EXPANDED ORDER DETAIL PANEL */}
+                    {isExpanded && (
+                      <tr className="border-t border-slate-800/40">
+                        <td colSpan={7} className="px-4 py-3 bg-slate-900/60">
+                          <div className="ml-13 pl-13" style={{ paddingLeft: "52px" }}>
+                            {expandedItem.loading ? (
+                              <div className="text-slate-500 text-[11px] py-2">Loading orders…</div>
+                            ) : expandedItem.error ? (
+                              <div className="text-red-400 text-[11px] py-2">{expandedItem.error}</div>
+                            ) : expandedItem.orders.length === 0 ? (
+                              <div className="text-slate-500 text-[11px] py-2">No buy orders found on White.Market</div>
+                            ) : (
+                              <div>
+                                <div className="text-slate-500 text-[10px] mb-2 uppercase tracking-wide">
+                                  White.Market Buy Orders — {expandedItem.totalCount} total
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                  {expandedItem.orders.map((order, i) => (
+                                    <div
+                                      key={i}
+                                      className="flex items-center gap-2 bg-slate-800/60 border border-slate-700/50 rounded-lg px-3 py-1.5"
+                                    >
+                                      <span className="text-emerald-400 font-semibold text-[12px]">{fmt(order.priceUsd)}</span>
+                                      <span className="text-slate-500 text-[10px]">×{order.quantity}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                    </React.Fragment>
                   );
                 })}
               </tbody>
