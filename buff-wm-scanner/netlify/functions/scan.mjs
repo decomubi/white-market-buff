@@ -282,6 +282,7 @@ export async function handler(event) {
     }
 
     const search = (qs.search || "").trim();
+    const limit = Math.max(1, Math.min(100, parseInt(qs.limit) || 20));
     const fx = Number(process.env.FX_CNYUSD || "0.14");
 
     // Price range: frontend sends USD, we convert to CNY fen for BUFF.
