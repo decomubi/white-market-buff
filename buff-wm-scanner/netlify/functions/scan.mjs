@@ -142,60 +142,79 @@ async function wmGetAccessToken() {
   return token;
 }
 
-// Fetch the highest buy order for a given nameHash using order_list
-// We sort by PRICE DESC and take the first result — that's the best buy order.
-async function wmHighestBuyOrder(nameHash) {
-  const accessToken = await wmGetAccessToken();
+// --------------- White.Market order_list helpers ---------------
+// order_list is WM's buy-orders endpoint.
+// Docs: https://api.white.market/docs_partner/api/query/order_list.html
+// Valid search fields: appId, nameHash, nameStrict, sort, price, distinctValues, personOwn, csgo* filters
+// Valid sort fields (MarketOrderSortField): PRICE | CREATED_AT | POPULARITY
 
-  const query = `
-    query($nameHash: String!) {
-      order_list(
-        search: {
-          appId: CSGO
-          nameHash: $nameHash
-          nameStrict: false
-          orderType: BUY
-          sort: { field: PRICE, type: DESC }
-        }
-        forwardPagination: { first: 1 }
-      ) {
-        edges {
-          node {
-            quantity
-            price { value currency }
+function wmOrderQuery(nameHash, count = 1) {
+  return {
+    query: `
+      query($nameHash: String!) {
+        order_list(
+          search: {
+            appId: CSGO
+            nameHash: $nameHash
+            nameStrict: true
+            sort: { field: PRICE, type: DESC }
           }
+          forwardPagination: { first: ${count} }
+        ) {
+          edges {
+            node {
+              quantity
+              price { value currency }
+            }
+          }
+          totalCount
         }
-        totalCount
       }
-    }
-  `;
+    `,
+    variables: { nameHash },
+  };
+}
 
+async function wmFetchOrders(nameHash, count = 1) {
+  const accessToken = await wmGetAccessToken();
   const r = await fetch(WM_GQL, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       Authorization: `Bearer ${accessToken}`,
     },
-    body: JSON.stringify({ query, variables: { nameHash } }),
+    body: JSON.stringify(wmOrderQuery(nameHash, count)),
   });
-
   const j = await r.json().catch(() => ({}));
-
-  // Debug: log raw WM response so we can see errors or unexpected shapes
-  console.log("WM order_list raw", nameHash, JSON.stringify(j).slice(0, 400));
+  console.log("WM order_list", nameHash, JSON.stringify(j).slice(0, 500));
 
   if (j?.errors?.length) {
-    throw new Error(j.errors[0].message || "WM GraphQL error");
+    console.error("WM GraphQL error for", nameHash, j.errors[0].message);
+    return { edges: [], totalCount: 0 };
   }
+  return j?.data?.order_list || { edges: [], totalCount: 0 };
+}
 
-  const edges = j?.data?.order_list?.edges || [];
-  const totalCount = j?.data?.order_list?.totalCount || 0;
-  const node = edges[0]?.node;
-
+// Returns { priceUsd, quantity, totalOrders } for the single highest buy order
+async function wmHighestBuyOrder(nameHash) {
+  const data = await wmFetchOrders(nameHash, 1);
+  const node = data.edges?.[0]?.node;
   return {
     priceUsd: node?.price?.value != null ? Number(node.price.value) : 0,
     quantity: node?.quantity != null ? Number(node.quantity) : 0,
-    totalOrders: totalCount,
+    totalOrders: data.totalCount || 0,
+  };
+}
+
+// Returns array of { priceUsd, quantity } for up to N orders (for detail popup)
+async function wmGetOrders(nameHash, count = 10) {
+  const data = await wmFetchOrders(nameHash, count);
+  return {
+    totalCount: data.totalCount || 0,
+    orders: (data.edges || []).map((e) => ({
+      priceUsd: e.node?.price?.value != null ? Number(e.node.price.value) : 0,
+      quantity: e.node?.quantity != null ? Number(e.node.quantity) : 0,
+    })),
   };
 }
 
@@ -216,7 +235,7 @@ async function mapLimit(arr, limit, fn) {
 // --------------- main handler ---------------
 // _built: used to confirm the correct version is deployed.
 // Check this in Network tab response: { _built: "2026-02-02T01:00:00Z", ... }
-const _BUILT = "2026-02-02T01:00:00Z";
+const _BUILT = "2026-02-02T02:00:00Z";
 export async function handler(event) {
   // CORS preflight
   if (event.httpMethod === "OPTIONS") {
@@ -233,7 +252,35 @@ export async function handler(event) {
 
   try {
     const qs = event.queryStringParameters || {};
-    const limit = Math.min(Math.max(parseInt(qs.limit || "20", 10) || 20, 1), 50);
+
+    // --------------- introspection debug ---------------
+    // Hit /.netlify/functions/scan?introspect=1 to dump the WM GraphQL schema
+    if (qs.introspect === "1") {
+      const accessToken = await wmGetAccessToken();
+      const introQuery = `{
+        __schema {
+          queryType { fields { name, args { name, type { name, kind, ofType { name, kind } } } } }
+        }
+      }`;
+      const r = await fetch(WM_GQL, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ query: introQuery }),
+      });
+      const j = await r.json().catch(() => ({}));
+      return ok({ introspection: j });
+    }
+    // --------------- order detail endpoint ---------------
+    // Hit /.netlify/functions/scan?orders=AK-47+|+Redline to get buy order list
+    if (qs.orders) {
+      const wmName = stripWear(qs.orders);
+      const data = await wmGetOrders(wmName, 10);
+      return ok({ ok: true, nameHash: wmName, ...data });
+    }
+
     const search = (qs.search || "").trim();
     const fx = Number(process.env.FX_CNYUSD || "0.14");
 
