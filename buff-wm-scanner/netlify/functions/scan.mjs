@@ -93,13 +93,29 @@ async function buffFetch(path, params = {}) {
   return json;
 }
 
-async function buffGoodsList({ search = "", pageNum = 1, pageSize = 20 } = {}) {
+// Strip wear condition so White.Market nameHash matches.
+// e.g. "AWP | Dragon Lore | Minimal Wear" → "AWP | Dragon Lore"
+const WEAR_SUFFIXES = [
+  "Factory New","Minimal Wear","Well-Worn","Field-Tested","Battle-Scarred",
+];
+function stripWear(name) {
+  for (const w of WEAR_SUFFIXES) {
+    if (name.endsWith(w)) return name.slice(0, -w.length).replace(/\s*\|\s*$/, "").trim();
+  }
+  return name;
+}
+
+// minPriceCny / maxPriceCny are in CNY fen (integer, 100 = 1 CNY).
+// Undefined values are simply omitted from the request.
+async function buffGoodsList({ search = "", pageNum = 1, pageSize = 20, minPriceCny, maxPriceCny } = {}) {
   const data = await buffFetch("/api/market/goods", {
     game: "csgo",
     page_num: pageNum,
     page_size: pageSize,
     search,
-    sort_by: "price.desc",
+    sort_by: "sell_num.desc",   // sort by most-listed (liquidity) not price
+    price_min: minPriceCny,     // undefined → skipped by buffFetch
+    price_max: maxPriceCny,
   });
   return data?.data?.items || [];
 }
@@ -254,20 +270,27 @@ export async function handler(event) {
     const search = (qs.search || "").trim();
     const fx = Number(process.env.FX_CNYUSD || "0.14");
 
+    // Price range: frontend sends USD, we convert to CNY fen for BUFF.
+    // 1 USD = (1 / fx) CNY.  1 CNY = 100 fen.
+    const minUsd = parseFloat(qs.minPrice);
+    const maxUsd = parseFloat(qs.maxPrice);
+    const minPriceCny = !isNaN(minUsd) && minUsd > 0 ? Math.round((minUsd / fx) * 100) : undefined;
+    const maxPriceCny = !isNaN(maxUsd) && maxUsd > 0 ? Math.round((maxUsd / fx) * 100) : undefined;
+
     // --- dummy mode ---
     if (process.env.USE_DUMMY === "1") {
       return ok({ ok: true, fx, items: buildDummyItems(limit, fx) });
     }
 
     // --- BUFF cache (60s) ---
-    const cacheKey = `${search}|${limit}`;
+    const cacheKey = `${search}|${limit}|${minPriceCny ?? ""}|${maxPriceCny ?? ""}`;
     const now = Date.now();
     let buffItems;
 
     if (buffCache.items?.length && buffCache.key === cacheKey && now - buffCache.ts < 60000) {
       buffItems = buffCache.items;
     } else {
-      buffItems = await buffGoodsList({ search, pageNum: 1, pageSize: limit });
+      buffItems = await buffGoodsList({ search, pageNum: 1, pageSize: limit, minPriceCny, maxPriceCny });
       buffCache = { ts: now, key: cacheKey, items: buffItems };
     }
 
@@ -306,9 +329,11 @@ export async function handler(event) {
       .filter(Boolean);
 
     // --- fetch White.Market buy orders (4 concurrent) ---
+    // stripWear removes e.g. "| Minimal Wear" so WM's nameHash matches
     const enriched = await mapLimit(rows, 4, async (row) => {
       try {
-        const wm = await wmHighestBuyOrder(row.name);
+        const wmName = stripWear(row.name);
+        const wm = await wmHighestBuyOrder(wmName);
         const wmBuyOrderUsd = wm.priceUsd || 0;
         const spreadPct =
           row.buffPriceUsd > 0
@@ -324,7 +349,7 @@ export async function handler(event) {
           profitUsd,
         };
       } catch (e) {
-        console.error(`WM error for "${row.name}":`, e.message);
+        console.error(`WM error for "${stripWear(row.name)}":`, e.message);
         return { ...row, wmBuyOrderUsd: 0, wmOrderCount: 0, spreadPct: 0, profitUsd: 0 };
       }
     });
