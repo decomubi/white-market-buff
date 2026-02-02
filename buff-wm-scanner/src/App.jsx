@@ -62,13 +62,13 @@ const App = () => {
   const [fx, setFx] = useState(0.14);
   const [search, setSearch] = useState("");
   const [limit, setLimit] = useState(20);
+  const [minPrice, setMinPrice] = useState("0.10");
+  const [maxPrice, setMaxPrice] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [lastUpdated, setLastUpdated] = useState(null);
   const [sortConfig, setSortConfig] = useState({ key: "profitUsd", direction: "desc" });
   const [onlyProfitable, setOnlyProfitable] = useState(false);
-  const [priceMin, setPriceMin] = useState("");
-  const [priceMax, setPriceMax] = useState("");
 
   // --------------- fetch ---------------
   const fetchData = async () => {
@@ -77,6 +77,8 @@ const App = () => {
     try {
       const params = new URLSearchParams({ limit: String(limit) });
       if (search.trim()) params.set("search", search.trim());
+      if (minPrice && parseFloat(minPrice) > 0) params.set("minPrice", minPrice);
+      if (maxPrice && parseFloat(maxPrice) > 0) params.set("maxPrice", maxPrice);
 
       const res = await fetch(`/.netlify/functions/scan?${params}`);
       if (!res.ok) throw new Error(`HTTP ${res.status} from scan function`);
@@ -130,8 +132,6 @@ const App = () => {
       res = res.filter((i) => (i.name || "").toLowerCase().includes(q));
     }
     if (onlyProfitable) res = res.filter((i) => i.profitUsd > 0);
-    if (priceMin !== "") res = res.filter((i) => Number(i.buffPriceUsd) >= Number(priceMin));
-    if (priceMax !== "") res = res.filter((i) => Number(i.buffPriceUsd) <= Number(priceMax));
 
     const { key, direction } = sortConfig;
     res.sort((a, b) => {
@@ -141,7 +141,7 @@ const App = () => {
     });
 
     return res;
-  }, [items, search, onlyProfitable, priceMin, priceMax, sortConfig]);
+  }, [items, search, onlyProfitable, sortConfig]);
 
   // --------------- render ---------------
   return (
@@ -203,9 +203,31 @@ const App = () => {
             />
           </div>
 
+          {/* PRICE RANGE */}
+          <div className="flex items-center gap-1.5 bg-slate-900/70 border border-slate-800 rounded-xl px-2.5 py-1.5">
+            <span className="text-[10px] text-slate-500 uppercase tracking-wide mr-1">$</span>
+            <input
+              type="number"
+              min={0}
+              step={0.01}
+              value={minPrice}
+              onChange={(e) => setMinPrice(e.target.value)}
+              placeholder="Min"
+              className="w-16 bg-transparent border-none text-xs text-slate-200 focus:outline-none placeholder:text-slate-600"
+            />
+            <span className="text-slate-600 text-xs">–</span>
+            <input
+              type="number"
+              min={0}
+              step={0.01}
+              value={maxPrice}
+              onChange={(e) => setMaxPrice(e.target.value)}
+              placeholder="Max"
+              className="w-16 bg-transparent border-none text-xs text-slate-200 focus:outline-none placeholder:text-slate-600"
+            />
+          </div>
+
           <button
-            type="button"
-            onClick={() => setOnlyProfitable((v) => !v)}
             className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-xs transition-colors ${
               onlyProfitable
                 ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-300"
@@ -238,47 +260,6 @@ const App = () => {
                 "Scan"
               )}
             </button>
-          </div>
-        </div>
-
-        {/* PRICE FILTER ROW */}
-        <div className="flex flex-col md:flex-row gap-3 items-center mb-4">
-          <span className="text-xs text-slate-400 whitespace-nowrap">Buff price (USD)</span>
-          <div className="flex items-center gap-2 w-full md:w-auto">
-            <div className="relative flex-1 md:flex-none md:w-32">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs">$</span>
-              <input
-                type="number"
-                min={0}
-                step={0.01}
-                value={priceMin}
-                onChange={(e) => setPriceMin(e.target.value)}
-                placeholder="Min"
-                className="w-full bg-slate-900/70 border border-slate-800 rounded-xl pl-6 pr-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-slate-600"
-              />
-            </div>
-            <span className="text-slate-600 text-xs">–</span>
-            <div className="relative flex-1 md:flex-none md:w-32">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-xs">$</span>
-              <input
-                type="number"
-                min={0}
-                step={0.01}
-                value={priceMax}
-                onChange={(e) => setPriceMax(e.target.value)}
-                placeholder="Max"
-                className="w-full bg-slate-900/70 border border-slate-800 rounded-xl pl-6 pr-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 placeholder:text-slate-600"
-              />
-            </div>
-            {(priceMin !== "" || priceMax !== "") && (
-              <button
-                type="button"
-                onClick={() => { setPriceMin(""); setPriceMax(""); }}
-                className="text-xs text-slate-500 hover:text-slate-300 transition-colors px-2 py-1 rounded-lg hover:bg-slate-800"
-              >
-                Clear
-              </button>
-            )}
           </div>
         </div>
 
