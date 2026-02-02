@@ -5,9 +5,6 @@
 //   BUFF_COOKIE          – full cookie string from buff.163.com
 //   WM_PARTNER_TOKEN     – partner token from white.market profile
 //   FX_CNYUSD            – CNY → USD rate (e.g. "0.14")
-//
-// Optional:
-//   USE_DUMMY            – set to "1" to return dummy data for testing
 
 const BUFF_BASE = "https://buff.163.com";
 const WM_GQL = "https://api.white.market/graphql/partner";
@@ -212,44 +209,10 @@ async function mapLimit(arr, limit, fn) {
   return ret;
 }
 
-// --------------- dummy data ---------------
-function buildDummyItems(limit, fx) {
-  const names = [
-    "AK-47 | Redline | Field-Tested",
-    "AWP | Dragon Lore | Well-Worn",
-    "Knife | Butterfly | Minimal Wear",
-    "M4A4 | Howl | Battle-Tested",
-    "USP-S | Guardian | Minimal Wear",
-    "Glock-18 | Fade | Factory New",
-    "AK-47 | Vulcan | Minimal Wear",
-    "AWP | Medusa | Field-Tested",
-    "Knife | Karambit | Factory New",
-    "M4A1-S | Hyper Beast | Well-Worn",
-  ];
-
-  return Array.from({ length: limit }, (_, i) => {
-    const buffPriceCny = 50 + (i + 1) * 12.5;
-    const buffPriceUsd = Number((buffPriceCny * fx).toFixed(2));
-    const wmBuyOrder = Number((buffPriceUsd * (1.1 + (i % 3) * 0.08)).toFixed(2));
-    const spread = Number(((wmBuyOrder / buffPriceUsd - 1) * 100).toFixed(2));
-    const profit = Number((wmBuyOrder - buffPriceUsd).toFixed(2));
-
-    return {
-      id: i + 1,
-      name: names[i % names.length],
-      image: "",
-      buffPriceCny,
-      buffPriceUsd,
-      wmBuyOrderUsd: wmBuyOrder,
-      wmOrderCount: 3 + i,
-      spreadPct: spread,
-      profitUsd: profit,
-      buffQuantity: 10 + i * 3,
-    };
-  });
-}
-
 // --------------- main handler ---------------
+// _built: used to confirm the correct version is deployed.
+// Check this in Network tab response: { _built: "2026-02-02T01:00:00Z", ... }
+const _BUILT = "2026-02-02T01:00:00Z";
 export async function handler(event) {
   // CORS preflight
   if (event.httpMethod === "OPTIONS") {
@@ -276,11 +239,6 @@ export async function handler(event) {
     const maxUsd = parseFloat(qs.maxPrice);
     const minPriceCny = !isNaN(minUsd) && minUsd > 0 ? Math.round((minUsd / fx) * 100) : undefined;
     const maxPriceCny = !isNaN(maxUsd) && maxUsd > 0 ? Math.round((maxUsd / fx) * 100) : undefined;
-
-    // --- dummy mode ---
-    if (process.env.USE_DUMMY === "1") {
-      return ok({ ok: true, fx, items: buildDummyItems(limit, fx) });
-    }
 
     // --- BUFF cache (60s) ---
     const cacheKey = `${search}|${limit}|${minPriceCny ?? ""}|${maxPriceCny ?? ""}`;
@@ -354,7 +312,7 @@ export async function handler(event) {
       }
     });
 
-    return ok({ ok: true, fx, items: enriched });
+    return ok({ ok: true, _built: _BUILT, fx, items: enriched });
   } catch (e) {
     console.error("scan.mjs top-level error:", e);
     return fail(500, String(e?.message || e));
