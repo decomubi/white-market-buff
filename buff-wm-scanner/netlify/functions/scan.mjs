@@ -153,7 +153,8 @@ async function wmHighestBuyOrder(nameHash) {
         search: {
           appId: CSGO
           nameHash: $nameHash
-          nameStrict: true
+          nameStrict: false
+          orderType: BUY
           sort: { field: PRICE, type: DESC }
         }
         forwardPagination: { first: 1 }
@@ -179,6 +180,9 @@ async function wmHighestBuyOrder(nameHash) {
   });
 
   const j = await r.json().catch(() => ({}));
+
+  // Debug: log raw WM response so we can see errors or unexpected shapes
+  console.log("WM order_list raw", nameHash, JSON.stringify(j).slice(0, 400));
 
   if (j?.errors?.length) {
     throw new Error(j.errors[0].message || "WM GraphQL error");
